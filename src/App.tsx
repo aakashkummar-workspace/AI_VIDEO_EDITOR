@@ -378,14 +378,11 @@ export default function App() {
   }
 
   return (
-    <div>
-      <h1>Playback</h1>
+    <div className="app">
+      <header className="topbar">
+        <h1 className="wordmark">Video Editor</h1>
 
-      <p>
-        <input type="file" accept="video/*" onChange={handleFileChange} />
-      </p>
-
-      <p>
+        <div className="transport">
         <button
           type="button"
           onClick={() => playerRef.current?.play()}
@@ -410,9 +407,9 @@ export default function App() {
         <span data-testid="time">
           {formatMicros(currentMicros)} / {formatMicros(duration)}
         </span>
-      </p>
+        </div>
 
-      <p>
+        <div className="zoom-controls">
         <button
           type="button"
           data-testid="zoom-out"
@@ -431,12 +428,18 @@ export default function App() {
           Fit
         </button>{' '}
         <span data-testid="zoom">{Math.round(pixelsPerSecond)} px/s</span>
-      </p>
+        </div>
+      </header>
 
-      {exportPercent !== null && <p>Exporting: {exportPercent}%</p>}
-
-      {error !== null && <p style={{ color: 'red' }}>Error: {error}</p>}
-
+      <aside className="sidebar">
+        <section className="panel">
+          <h2 className="panel-title">Media</h2>
+          <input
+            type="file"
+            accept="video/*"
+            onChange={handleFileChange}
+            className="file-input"
+          />
       {sources.length > 0 && (
         <ul className="media-list" data-testid="media-list">
           {sources.map((source) => (
@@ -458,15 +461,11 @@ export default function App() {
         </ul>
       )}
 
-      {hasTimeline && (
-        <p>
-          Composition {displayProject.composition.width} x{' '}
-          {displayProject.composition.height} &mdash; drag to move, drag an edge
-          to trim, S to split at the playhead
-        </p>
-      )}
+        </section>
 
-      <p className="overlay-form">
+        <section className="panel">
+          <h2 className="panel-title">Text</h2>
+      <div className="overlay-form">
         <input
           type="text"
           value={overlayText}
@@ -562,28 +561,66 @@ export default function App() {
             </button>
           </>
         )}
-      </p>
+      </div>
 
-      <canvas ref={canvasRef} style={{ maxWidth: '100%' }} />
+        </section>
 
-      <Timeline
-        project={displayProject}
-        currentMicros={currentMicros}
-        onSeek={(micros) => {
-          if (swallowNextSeekRef.current) {
-            swallowNextSeekRef.current = false
-            return
+        <section className="panel shortcuts">
+          <h2 className="panel-title">Shortcuts</h2>
+          <dl>
+            <dt>S</dt>
+            <dd>split at the playhead</dd>
+            <dt>Ctrl+Z</dt>
+            <dd>undo</dd>
+            <dt>Ctrl+Y</dt>
+            <dd>redo</dd>
+            <dt>Ctrl+scroll</dt>
+            <dd>zoom the timeline</dd>
+            <dt>drag</dt>
+            <dd>move a clip; drag an edge to trim</dd>
+          </dl>
+        </section>
+      </aside>
+
+      <main className="stage">
+        <div className="stage-status">
+          {exportPercent !== null && (
+            <p className="status status-busy">Exporting: {exportPercent}%</p>
+          )}
+          {error !== null && <p className="status status-error">Error: {error}</p>}
+          {hasTimeline && (
+            <p className="status">
+              Composition {displayProject.composition.width} x{' '}
+              {displayProject.composition.height}
+            </p>
+          )}
+        </div>
+
+        <div className="stage-canvas">
+          <canvas ref={canvasRef} />
+        </div>
+      </main>
+
+      <footer className="dock">
+        <Timeline
+          project={displayProject}
+          currentMicros={currentMicros}
+          onSeek={(micros) => {
+            if (swallowNextSeekRef.current) {
+              swallowNextSeekRef.current = false
+              return
+            }
+            seekFromUser(micros)
+          }}
+          onClipGrab={handleClipGrab}
+          pixelsPerSecond={pixelsPerSecond}
+          onZoom={setPixelsPerSecond}
+          selectedId={selectedOverlayId}
+          onSelect={(id, target) =>
+            setSelectedOverlayId(target === 'overlay' ? id : null)
           }
-          seekFromUser(micros)
-        }}
-        onClipGrab={handleClipGrab}
-        pixelsPerSecond={pixelsPerSecond}
-        onZoom={setPixelsPerSecond}
-        selectedId={selectedOverlayId}
-        onSelect={(id, target) =>
-          setSelectedOverlayId(target === 'overlay' ? id : null)
-        }
-      />
+        />
+      </footer>
     </div>
   )
 }
