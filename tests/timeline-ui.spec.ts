@@ -130,7 +130,11 @@ test('the playhead lands at the end when playback finishes', async ({
 
 test('the first frame appears as soon as a file is loaded', async ({ page }) => {
   // Nothing has been clicked and nothing is playing: loading a file must be
-  // enough to put a frame on the canvas.
+  // enough to put a frame on the canvas. The frame comes back from the worker,
+  // so wait for the paint rather than assuming it has already happened - the
+  // claim is that no interaction is needed, not that it is synchronous.
+  await expect.poll(async () => (await canvasStats(page)).max).toBeGreaterThan(0)
+
   const stats = await canvasStats(page)
 
   expect(stats.transparent, 'the canvas should not be blank').toBe(0)

@@ -111,3 +111,45 @@ test('the form edits the selected overlay', async ({ page }) => {
   expect(await overlays(page)).toEqual([])
   await expect(page.getByTestId('overlay-block')).toHaveCount(0)
 })
+
+test('typing a caption is one undo step, not one per letter', async ({
+  page,
+}) => {
+  const before = await undoDepth(page)
+
+  const field = page.getByTestId('overlay-text')
+  await field.click()
+  await page.keyboard.press('Control+a')
+  await field.pressSequentially('CAPTION', { delay: 15 })
+  expect(await overlays(page)).toMatchObject([{ content: 'CAPTION' }])
+
+  // A continuous interaction is one edit, the same as a drag is.
+  expect(await undoDepth(page)).toBe(before + 1)
+
+  // Ctrl+Z is ignored while a field has focus, so the browser's own field
+  // undo does not shadow the app's. Leave the field first.
+  await page.locator('.wordmark').click()
+  await page.keyboard.press('Control+z')
+  expect(await overlays(page)).toMatchObject([{ content: 'Text' }])
+})
+
+test('nudging a number field is one undo step per visit', async ({ page }) => {
+  const before = await undoDepth(page)
+  const x = page.getByTestId('overlay-x')
+
+  await x.click()
+  for (let press = 0; press < 5; press++) await page.keyboard.press('ArrowUp')
+  expect(await overlays(page)).toMatchObject([{ x: 37 }])
+  expect(await undoDepth(page)).toBe(before + 1)
+
+  // Leaving the field and coming back starts a fresh step.
+  await page.getByTestId('overlay-y').click()
+  await x.click()
+  await page.keyboard.press('ArrowUp')
+
+  expect(await undoDepth(page)).toBe(before + 2)
+
+  await page.locator('.wordmark').click()
+  await page.keyboard.press('Control+z')
+  expect(await overlays(page)).toMatchObject([{ x: 37 }])
+})

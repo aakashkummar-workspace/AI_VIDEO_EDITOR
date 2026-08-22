@@ -256,3 +256,98 @@ describe('source registry', () => {
     expect(getSourceFile(source.id)).toBe(file)
   })
 })
+
+describe('coalescing continuous edits', () => {
+  const overlay = {
+    id: 'text-1',
+    content: '',
+    x: 10,
+    y: 20,
+    sizePx: 32,
+    color: '#ffffff',
+    timelineStartMicros: 0,
+    durationMicros: 2 * SECOND,
+  }
+
+  function type(text: string) {
+    for (let length = 1; length <= text.length; length++) {
+      store().setOverlayStyle({
+        overlayId: overlay.id,
+        content: text.slice(0, length),
+      })
+    }
+  }
+
+  beforeEach(() => {
+    store().addOverlay(overlay)
+  })
+
+  it('treats a run of typing as one undo step', () => {
+    const depth = store().past.length
+    type('CAPTION')
+
+    expect(store().project.overlays[0]!.content).toBe('CAPTION')
+    // Seven changes, one step - not one step per letter.
+    expect(store().past).toHaveLength(depth + 1)
+  })
+
+  it('undoes the whole run at once, back to where it started', () => {
+    type('CAPTION')
+    store().undo()
+
+    expect(store().project.overlays[0]!.content).toBe('')
+  })
+
+  it('redoes the whole run at once', () => {
+    type('CAPTION')
+    const typed = store().project
+    store().undo()
+    store().redo()
+
+    expect(store().project).toEqual(typed)
+  })
+
+  it('starts a new step for a different field', () => {
+    const depth = store().past.length
+    type('AB')
+    store().setOverlayStyle({ overlayId: overlay.id, x: 99 })
+
+    expect(store().past).toHaveLength(depth + 2)
+
+    // Undoing the nudge leaves the typing intact.
+    store().undo()
+    expect(store().project.overlays[0]!.x).toBe(10)
+    expect(store().project.overlays[0]!.content).toBe('AB')
+  })
+
+  it('starts a new step after leaving the field', () => {
+    const depth = store().past.length
+    type('AB')
+    store().endCoalescing()
+    type('CD')
+
+    expect(store().past).toHaveLength(depth + 2)
+    store().undo()
+    expect(store().project.overlays[0]!.content).toBe('AB')
+  })
+
+  it('starts a new step after any other edit', () => {
+    const depth = store().past.length
+    type('AB')
+    store().moveOverlay({ overlayId: overlay.id, timelineStartMicros: SECOND })
+    type('CD')
+
+    expect(store().past).toHaveLength(depth + 3)
+  })
+
+  it('does not merge across an undo', () => {
+    type('AB')
+    store().undo()
+    type('CD')
+
+    // The redo of the first run is gone, and the second run stands alone.
+    expect(store().canRedo()).toBe(false)
+    store().undo()
+    expect(store().project.overlays[0]!.content).toBe('')
+  })
+})

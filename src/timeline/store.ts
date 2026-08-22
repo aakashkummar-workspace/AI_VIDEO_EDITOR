@@ -24,6 +24,12 @@ enablePatches()
 type Change = {
   patches: Patch[]
   inverse: Patch[]
+  /**
+   * Set when this step may absorb the next one. Typing a caption is one edit,
+   * not one edit per letter, so consecutive changes carrying the same key are
+   * merged rather than stacked.
+   */
+  coalesceKey?: string
 }
 
 /** How many undo steps to keep. */
@@ -50,6 +56,12 @@ export type TimelineStore = {
   trimOverlayEnd: (input: OverlayTrimInput) => void
   setOverlayStyle: (input: OverlayStyleInput) => void
 
+  /**
+   * Ends the run of edits currently being merged, so the next one starts a
+   * fresh undo step. Called when a field is left.
+   */
+  endCoalescing: () => void
+
   undo: () => void
   redo: () => void
   canUndo: () => boolean
@@ -58,11 +70,23 @@ export type TimelineStore = {
 }
 
 export const useTimelineStore = create<TimelineStore>((set, get) => {
+  /** Which run of edits is currently absorbing further changes, if any. */
+  let coalescing: string | null = null
+
   /**
    * Runs one mutator as a single undo step. If the mutator throws, produce
    * discards the draft and the store is left exactly as it was.
+   *
+   * With a `coalesceKey`, a change that follows another carrying the same key
+   * is merged into it instead of pushed on top - otherwise a continuous
+   * interaction like typing fills the history with intermediate states and
+   * undo removes one keystroke at a time.
    */
-  function apply<A>(mutator: (draft: Project, args: A) => void, args: A): void {
+  function apply<A>(
+    mutator: (draft: Project, args: A) => void,
+    args: A,
+    coalesceKey?: string,
+  ): void {
     const [project, patches, inverse] = produceWithPatches(
       get().project,
       (draft) => {
@@ -73,7 +97,28 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     // A no-op operation should not cost an undo step.
     if (patches.length === 0) return
 
-    const past = [...get().past, { patches, inverse }].slice(-HISTORY_LIMIT)
+    const history = get().past
+    const previous = history.at(-1)
+
+    if (coalesceKey && coalescing === coalesceKey && previous) {
+      // Redo replays the whole run in order; undo unwinds it newest first.
+      const merged: Change = {
+        patches: [...previous.patches, ...patches],
+        inverse: [...inverse, ...previous.inverse],
+        coalesceKey,
+      }
+      set({
+        project,
+        past: [...history.slice(0, -1), merged],
+        future: [],
+      })
+      return
+    }
+
+    coalescing = coalesceKey ?? null
+    const past = [...history, { patches, inverse, coalesceKey }].slice(
+      -HISTORY_LIMIT,
+    )
     set({ project, past, future: [] })
   }
 
@@ -107,12 +152,29 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     moveOverlay: (input) => apply(mutators.moveOverlay, input),
     trimOverlayStart: (input) => apply(mutators.trimOverlayStart, input),
     trimOverlayEnd: (input) => apply(mutators.trimOverlayEnd, input),
-    setOverlayStyle: (input) => apply(mutators.setOverlayStyle, input),
+    /**
+     * The key names the overlay and the exact fields being changed, so typing
+     * merges with typing but a nudge of x afterwards starts its own step.
+     */
+    setOverlayStyle: (input) =>
+      apply(
+        mutators.setOverlayStyle,
+        input,
+        `style:${input.overlayId}:${Object.keys(input)
+          .filter((field) => field !== 'overlayId')
+          .sort()
+          .join(',')}`,
+      ),
+
+    endCoalescing: () => {
+      coalescing = null
+    },
 
     undo: () => {
       const { project, past, future } = get()
       const change = past.at(-1)
       if (!change) return
+      coalescing = null
 
       set({
         project: applyPatches(project, change.inverse),
@@ -125,6 +187,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
       const { project, past, future } = get()
       const change = future.at(-1)
       if (!change) return
+      coalescing = null
 
       set({
         project: applyPatches(project, change.patches),
@@ -135,7 +198,10 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
 
     canUndo: () => get().past.length > 0,
     canRedo: () => get().future.length > 0,
-    reset: () => set({ project: emptyProject(), past: [], future: [] }),
+    reset: () => {
+      coalescing = null
+      set({ project: emptyProject(), past: [], future: [] })
+    },
   }
 })
 

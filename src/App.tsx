@@ -510,6 +510,7 @@ export default function App() {
           type="text"
           value={overlayText}
           data-testid="overlay-text"
+          onBlur={() => useTimelineStore.getState().endCoalescing()}
           onChange={(event) => {
             setOverlayText(event.target.value)
             if (selectedOverlay) {
@@ -536,6 +537,7 @@ export default function App() {
               <input
                 type="number"
                 data-testid="overlay-x"
+                onBlur={() => useTimelineStore.getState().endCoalescing()}
                 value={selectedOverlay.x}
                 onChange={(event) =>
                   useTimelineStore.getState().setOverlayStyle({
@@ -550,6 +552,7 @@ export default function App() {
               <input
                 type="number"
                 data-testid="overlay-y"
+                onBlur={() => useTimelineStore.getState().endCoalescing()}
                 value={selectedOverlay.y}
                 onChange={(event) =>
                   useTimelineStore.getState().setOverlayStyle({
@@ -564,6 +567,7 @@ export default function App() {
               <input
                 type="number"
                 data-testid="overlay-size"
+                onBlur={() => useTimelineStore.getState().endCoalescing()}
                 value={selectedOverlay.sizePx}
                 onChange={(event) =>
                   useTimelineStore.getState().setOverlayStyle({
@@ -578,6 +582,7 @@ export default function App() {
               <input
                 type="color"
                 data-testid="overlay-color"
+                onBlur={() => useTimelineStore.getState().endCoalescing()}
                 value={selectedOverlay.color}
                 onChange={(event) =>
                   useTimelineStore.getState().setOverlayStyle({
