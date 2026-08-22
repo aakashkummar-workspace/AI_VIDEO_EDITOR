@@ -1,0 +1,114 @@
+import { applyPatches, enablePatches, produceWithPatches, type Patch } from 'immer'
+import { create } from 'zustand'
+import {
+  mutators,
+  type AddClipInput,
+  type MoveClipInput,
+  type SplitClipInput,
+  type TrimInput,
+} from './operations'
+import { emptyProject, type Project, type Source } from './types'
+
+enablePatches()
+
+/** One undo step: the patches that did it, and the patches that undo it. */
+type Change = {
+  patches: Patch[]
+  inverse: Patch[]
+}
+
+/** How many undo steps to keep. */
+const HISTORY_LIMIT = 100
+
+export type TimelineStore = {
+  project: Project
+  past: Change[]
+  future: Change[]
+
+  addSource: (source: Source) => void
+  addClip: (input: AddClipInput) => void
+  removeClip: (clipId: string) => void
+  moveClip: (input: MoveClipInput) => void
+  trimClipStart: (input: TrimInput) => void
+  trimClipEnd: (input: TrimInput) => void
+  splitClipAt: (input: SplitClipInput) => void
+
+  undo: () => void
+  redo: () => void
+  canUndo: () => boolean
+  canRedo: () => boolean
+  reset: () => void
+}
+
+export const useTimelineStore = create<TimelineStore>((set, get) => {
+  /**
+   * Runs one mutator as a single undo step. If the mutator throws, produce
+   * discards the draft and the store is left exactly as it was.
+   */
+  function apply<A>(mutator: (draft: Project, args: A) => void, args: A): void {
+    const [project, patches, inverse] = produceWithPatches(
+      get().project,
+      (draft) => {
+        mutator(draft, args)
+      },
+    )
+
+    // A no-op operation should not cost an undo step.
+    if (patches.length === 0) return
+
+    const past = [...get().past, { patches, inverse }].slice(-HISTORY_LIMIT)
+    set({ project, past, future: [] })
+  }
+
+  return {
+    project: emptyProject(),
+    past: [],
+    future: [],
+
+    /**
+     * Registering a source is not an edit, so it is not undoable: undoing past
+     * it would leave clips pointing at a source the project no longer knows.
+     */
+    addSource: (source) =>
+      set((state) => ({
+        project: produceWithPatches(state.project, (draft) => {
+          mutators.addSource(draft, source)
+        })[0],
+      })),
+
+    addClip: (input) => apply(mutators.addClip, input),
+    removeClip: (clipId) => apply(mutators.removeClip, clipId),
+    moveClip: (input) => apply(mutators.moveClip, input),
+    trimClipStart: (input) => apply(mutators.trimClipStart, input),
+    trimClipEnd: (input) => apply(mutators.trimClipEnd, input),
+    splitClipAt: (input) => apply(mutators.splitClipAt, input),
+
+    undo: () => {
+      const { project, past, future } = get()
+      const change = past.at(-1)
+      if (!change) return
+
+      set({
+        project: applyPatches(project, change.inverse),
+        past: past.slice(0, -1),
+        future: [...future, change],
+      })
+    },
+
+    redo: () => {
+      const { project, past, future } = get()
+      const change = future.at(-1)
+      if (!change) return
+
+      set({
+        project: applyPatches(project, change.patches),
+        past: [...past, change],
+        future: future.slice(0, -1),
+      })
+    },
+
+    canUndo: () => get().past.length > 0,
+    canRedo: () => get().future.length > 0,
+    reset: () => set({ project: emptyProject(), past: [], future: [] }),
+  }
+})
