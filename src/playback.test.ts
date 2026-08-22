@@ -11,7 +11,7 @@ import {
 } from './playback'
 
 function buffered(...timestamps: number[]) {
-  return timestamps.map((timestampMicros) => ({ timestampMicros }))
+  return timestamps.map((timelineMicros) => ({ timelineMicros }))
 }
 
 /** Records the ops drawFrame issues, so rotation math can be asserted. */

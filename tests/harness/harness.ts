@@ -12,13 +12,21 @@ import {
 } from 'mediabunny'
 import { createPlayer } from '../../src/player'
 import { microsToSeconds } from '../../src/playback'
+import { timelineDuration } from '../../src/timeline/operations'
+import {
+  clearSourceFiles,
+  registerSourceFile,
+} from '../../src/timeline/sourceRegistry'
+import { useTimelineStore } from '../../src/timeline/store'
 
 const canvas = document.getElementById('canvas') as HTMLCanvasElement
 
-let loaded: { width: number; height: number; durationMicros: number } | null =
-  null
 let lastError: string | null = null
 let exported: ArrayBuffer | null = null
+
+/** Every playhead position reported during the last playThrough. */
+let observedTimes: number[] = []
+let recordTimes = false
 
 let notifyTime: (() => void) | null = null
 let notifyStopped: (() => void) | null = null
@@ -27,10 +35,8 @@ let notifyExported: (() => void) | null = null
 const player = createPlayer(
   canvas,
   {
-    onLoaded: (info) => {
-      loaded = info
-    },
-    onTime: () => {
+    onTime: (timelineMicros) => {
+      if (recordTimes) observedTimes.push(timelineMicros)
       notifyTime?.()
       notifyTime = null
     },
@@ -123,37 +129,96 @@ async function generateFixture(options: {
   return Array.from(new Uint8Array(buffer))
 }
 
-async function loadFile(file: File) {
-  loaded = null
+export type ProjectSpec = {
+  composition: { width: number; height: number }
+  sourceUrl: string
+  sourceDurationMicros: number
+  clips: {
+    sourceInMicros: number
+    sourceOutMicros: number
+    timelineStartMicros: number
+  }[]
+}
+
+/** Builds a project from `spec` and hands it to the player. */
+async function loadFromFile(
+  file: File,
+  spec: Omit<ProjectSpec, 'sourceUrl'>,
+): Promise<{ width: number; height: number; durationMicros: number }> {
+  const store = useTimelineStore.getState()
+  store.reset()
+  clearSourceFiles()
   lastError = null
 
-  const ready = nextTime()
-  player.load(file)
-  await ready
+  const sourceId = 'src-fixture'
+  registerSourceFile(sourceId, file)
+
+  const geometry = await player.probeSource(sourceId, file)
+
+  store.setComposition(spec.composition)
+  store.addSource({
+    id: sourceId,
+    name: file.name,
+    durationMicros: geometry.durationMicros,
+    width: geometry.width,
+    height: geometry.height,
+    rotation: geometry.rotation,
+  })
+  spec.clips.forEach((clip, index) =>
+    store.addClip({ id: `clip-${index}`, sourceId, ...clip }),
+  )
+
+  const project = useTimelineStore.getState().project
+  player.setProject(project)
   throwIfErrored()
 
-  return loaded
+  return {
+    width: project.composition.width,
+    height: project.composition.height,
+    durationMicros: timelineDuration(project),
+  }
 }
 
-/** Loads the fixture straight from the dev server, no data round trip. */
-async function load(url: string) {
-  const response = await fetch(url)
-  if (!response.ok) throw new Error(`Could not fetch ${url}.`)
+async function loadProject(spec: ProjectSpec) {
+  const response = await fetch(spec.sourceUrl)
+  if (!response.ok) throw new Error(`Could not fetch ${spec.sourceUrl}.`)
 
-  const bytes = await response.arrayBuffer()
-  return loadFile(new File([bytes], 'fixture.mp4', { type: 'video/mp4' }))
+  const file = new File([await response.arrayBuffer()], 'fixture.mp4', {
+    type: 'video/mp4',
+  })
+  return loadFromFile(file, spec)
 }
 
-/** Loads the MP4 that the last export produced, so it can be compared. */
+/** Loads the MP4 the last export produced as a single full-length clip. */
 async function loadExported() {
   if (!exported) throw new Error('Nothing has been exported yet.')
-  return loadFile(new File([exported], 'exported.mp4', { type: 'video/mp4' }))
+
+  const file = new File([exported], 'exported.mp4', { type: 'video/mp4' })
+  const store = useTimelineStore.getState()
+  store.reset()
+  clearSourceFiles()
+
+  const sourceId = 'src-exported'
+  registerSourceFile(sourceId, file)
+  const geometry = await player.probeSource(sourceId, file)
+
+  return loadFromFile(file, {
+    composition: { width: geometry.width, height: geometry.height },
+    sourceDurationMicros: geometry.durationMicros,
+    clips: [
+      {
+        sourceInMicros: 0,
+        sourceOutMicros: geometry.durationMicros,
+        timelineStartMicros: 0,
+      },
+    ],
+  })
 }
 
-/** Renders one frame through the preview path and returns the canvas pixels. */
-async function pixelsAt(micros: number) {
+/** Renders one timeline position through the preview path, returns pixels. */
+async function pixelsAt(timelineMicros: number) {
   const ready = nextTime()
-  player.seek(micros)
+  player.seek(timelineMicros)
   await ready
   throwIfErrored()
 
@@ -181,23 +246,27 @@ async function playThrough() {
   const stopped = new Promise<void>((resolve) => {
     notifyStopped = resolve
   })
+
+  observedTimes = []
+  recordTimes = true
   player.play()
   await stopped
+  recordTimes = false
   throwIfErrored()
 
-  return player.stats()
+  return { ...player.stats(), times: observedTimes }
 }
 
 Object.assign(window, {
   harness: {
     generateFixture,
-    load,
+    loadProject,
     loadExported,
     pixelsAt,
     exportMp4,
     playThrough,
     frameCounts: () => player.frameCounts(),
-    duration: () => loaded?.durationMicros ?? 0,
+    duration: () => timelineDuration(useTimelineStore.getState().project),
     microsToSeconds,
   },
 })

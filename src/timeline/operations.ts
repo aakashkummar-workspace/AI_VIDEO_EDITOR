@@ -4,6 +4,7 @@ import {
   clipDuration,
   clipEndMicros,
   type Clip,
+  type Composition,
   type Project,
   type Source,
 } from './types'
@@ -85,6 +86,17 @@ export type MoveClipInput = {
 }
 
 export const mutators = {
+  setComposition(project: Project, composition: Composition): void {
+    assertIntegerMicros(composition.width, 'composition width')
+    assertIntegerMicros(composition.height, 'composition height')
+
+    if (composition.width <= 0 || composition.height <= 0) {
+      throw new Error('A composition must have a positive width and height.')
+    }
+
+    project.composition = { ...composition }
+  },
+
   addSource(project: Project, source: Source): void {
     assertIntegerMicros(source.durationMicros, 'durationMicros')
     if (source.durationMicros <= 0) {
@@ -239,6 +251,12 @@ export const mutators = {
     project.videoTrack.clips.splice(index + 1, 0, second)
   },
 }
+
+export const setComposition = (
+  project: Project,
+  composition: Composition,
+): Project =>
+  produce(project, (draft) => mutators.setComposition(draft, composition))
 
 export const addSource = (project: Project, source: Source): Project =>
   produce(project, (draft) => mutators.addSource(draft, source))

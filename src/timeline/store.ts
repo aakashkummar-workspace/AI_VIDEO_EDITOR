@@ -7,7 +7,12 @@ import {
   type SplitClipInput,
   type TrimInput,
 } from './operations'
-import { emptyProject, type Project, type Source } from './types'
+import {
+  emptyProject,
+  type Composition,
+  type Project,
+  type Source,
+} from './types'
 
 enablePatches()
 
@@ -25,6 +30,7 @@ export type TimelineStore = {
   past: Change[]
   future: Change[]
 
+  setComposition: (composition: Composition) => void
   addSource: (source: Source) => void
   addClip: (input: AddClipInput) => void
   removeClip: (clipId: string) => void
@@ -76,6 +82,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
         })[0],
       })),
 
+    setComposition: (composition) =>
+      apply(mutators.setComposition, composition),
     addClip: (input) => apply(mutators.addClip, input),
     removeClip: (clipId) => apply(mutators.removeClip, clipId),
     moveClip: (input) => apply(mutators.moveClip, input),

@@ -9,9 +9,20 @@ declare global {
         height: number
         fps: number
       }): Promise<number[]>
-      load(
-        url: string,
-      ): Promise<{ width: number; height: number; durationMicros: number } | null>
+      loadProject(spec: {
+        composition: { width: number; height: number }
+        sourceUrl: string
+        sourceDurationMicros: number
+        clips: {
+          sourceInMicros: number
+          sourceOutMicros: number
+          timelineStartMicros: number
+        }[]
+      }): Promise<{
+        width: number
+        height: number
+        durationMicros: number
+      } | null>
       loadExported(): Promise<{
         width: number
         height: number
@@ -19,7 +30,11 @@ declare global {
       } | null>
       pixelsAt(micros: number): Promise<number[]>
       exportMp4(): Promise<{ byteLength: number }>
-      playThrough(): Promise<ReturnType<ReturnType<typeof createPlayer>['stats']>>
+      playThrough(): Promise<
+        ReturnType<ReturnType<typeof createPlayer>['stats']> & {
+          times: number[]
+        }
+      >
       frameCounts(): Promise<{
         worker: { created: number; closed: number }
         main: { created: number; closed: number }

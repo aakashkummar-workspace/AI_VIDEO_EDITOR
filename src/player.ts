@@ -1,22 +1,20 @@
-import type { Rotation } from 'mediabunny'
 import { frameCounts, installFrameTracking } from './frameTracker'
-import { drawFrame, selectFrame } from './playback'
-import type { MainToWorker, WorkerToMain } from './workerProtocol'
-
-export type LoadedInfo = {
-  width: number
-  height: number
-  durationMicros: number
-}
+import { renderFrame, selectFrame } from './playback'
+import { timelineDuration } from './timeline/operations'
+import { emptyProject, type Project } from './timeline/types'
+import type {
+  MainToWorker,
+  SourceGeometry,
+  WorkerToMain,
+} from './workerProtocol'
 
 export type PlayerCallbacks = {
-  onLoaded: (info: LoadedInfo) => void
-  onTime: (micros: number) => void
+  /** Playhead position, in TIMELINE microseconds. */
+  onTime: (timelineMicros: number) => void
   onPlayingChange: (playing: boolean) => void
   /** Export progress from 0 to 1, or null when no export is running. */
   onExportProgress: (progress: number | null) => void
-  /** The finished MP4. The caller decides what to do with it. */
-  onExported: (buffer: ArrayBuffer, sourceName: string) => void
+  onExported: (buffer: ArrayBuffer) => void
   onError: (message: string) => void
 }
 
@@ -25,7 +23,8 @@ export type PlayerOptions = {
   instrument?: boolean
 }
 
-type BufferedFrame = { timestampMicros: number; frame: VideoFrame }
+/** A decoded item waiting to be shown: a frame, or null where a gap is. */
+type BufferedItem = { timelineMicros: number; frame: VideoFrame | null }
 
 type Stats = {
   decoded: number
@@ -38,7 +37,10 @@ const STATS_LOG_INTERVAL_MS = 1000
 
 /**
  * Owns the decode worker and the requestAnimationFrame playback loop.
- * The UI thread never decodes: it only receives frames and draws them.
+ *
+ * The player's input is the project, not a file. Everything it reports and
+ * everything it is asked for is in timeline microseconds; resolving that to a
+ * source and a source timestamp is the worker's job.
  */
 export function createPlayer(
   canvas: HTMLCanvasElement,
@@ -54,17 +56,13 @@ export function createPlayer(
     name: options.instrument ? 'instrumented' : 'video-worker',
   })
 
-  const buffer: BufferedFrame[] = []
+  const buffer: BufferedItem[] = []
 
+  let project: Project = emptyProject()
   let generation = 0
-  let rotation: Rotation = 0
-  let width = 0
-  let height = 0
-  let durationMicros = 0
 
   let playing = false
   let exporting = false
-  let sourceName = 'video'
   let streamEnded = false
   let currentMicros = 0
   let rafId: number | null = null
@@ -82,6 +80,7 @@ export function createPlayer(
     main: { created: number; closed: number }
   }
   let pendingFrameCounts: ((report: FrameCountReport) => void) | null = null
+  const pendingProbes = new Map<string, (geometry: SourceGeometry) => void>()
 
   function send(message: MainToWorker, transfer: Transferable[] = []) {
     worker.postMessage(message, transfer)
@@ -102,8 +101,8 @@ export function createPlayer(
 
   /** Closes and discards everything still buffered. */
   function flushBuffer() {
-    for (const buffered of buffer) {
-      buffered.frame.close()
+    for (const item of buffer) {
+      item.frame?.close()
       stats.dropped++
     }
     buffer.length = 0
@@ -117,11 +116,12 @@ export function createPlayer(
     return context
   }
 
-  function paint(frame: VideoFrame) {
+  /** The one render call on this thread. */
+  function paint(item: BufferedItem) {
     try {
-      drawFrame(context2d(), frame, width, height, rotation)
+      renderFrame(context2d(), project, item.timelineMicros, item.frame)
     } finally {
-      frame.close()
+      item.frame?.close()
     }
   }
 
@@ -135,7 +135,7 @@ export function createPlayer(
   function finish() {
     stopLoop()
     playing = false
-    currentMicros = durationMicros
+    currentMicros = timelineDuration(project)
     callbacks.onTime(currentMicros)
     callbacks.onPlayingChange(false)
     logStats('finished')
@@ -144,10 +144,10 @@ export function createPlayer(
   function tick() {
     const nowMs = performance.now()
 
-    // Anchor the clock to the first frame that actually arrives, so decoder
+    // Anchor the clock to the first item that actually arrives, so decoder
     // start-up latency is not counted as elapsed playback time.
     if (!clockSynced && buffer.length > 0) {
-      mediaStartMicros = buffer[0]!.timestampMicros
+      mediaStartMicros = buffer[0]!.timelineMicros
       wallStartMs = nowMs
       clockSynced = true
       lastStatsLogMs = nowMs
@@ -160,20 +160,24 @@ export function createPlayer(
 
       if (drawIndex >= 0) {
         for (let i = 0; i < drawIndex; i++) {
-          buffer[i]!.frame.close()
+          buffer[i]!.frame?.close()
           stats.dropped++
         }
 
         const chosen = buffer[drawIndex]!
-        paint(chosen.frame)
+        paint(chosen)
         stats.drawn++
-        currentMicros = chosen.timestampMicros
 
         const consumed = drawIndex + 1
         buffer.splice(0, consumed)
         send({ type: 'consumed', generation, count: consumed })
-        callbacks.onTime(currentMicros)
       }
+
+      // The playhead follows the clock, not the last frame drawn. A gap emits
+      // one black item and then nothing, so tracking frames would freeze the
+      // playhead for the length of the gap and then jump.
+      currentMicros = Math.min(targetMicros, timelineDuration(project))
+      callbacks.onTime(currentMicros)
     }
 
     if (nowMs - lastStatsLogMs >= STATS_LOG_INTERVAL_MS) {
@@ -194,41 +198,37 @@ export function createPlayer(
 
     if (message.type === 'frame') {
       if (message.generation !== generation) {
-        message.frame.close()
+        message.frame?.close()
         return
       }
 
+      const item: BufferedItem = {
+        timelineMicros: message.timelineMicros,
+        frame: message.frame,
+      }
+
       if (message.mode === 'seek') {
-        paint(message.frame)
-        currentMicros = message.timestampMicros
+        paint(item)
+        currentMicros = item.timelineMicros
         callbacks.onTime(currentMicros)
         return
       }
 
       stats.decoded++
-      buffer.push({
-        timestampMicros: message.timestampMicros,
-        frame: message.frame,
-      })
+      buffer.push(item)
       stats.peakBuffer = Math.max(stats.peakBuffer, buffer.length)
+      return
+    }
+
+    if (message.type === 'sourceProbed') {
+      pendingProbes.get(message.sourceId)?.(message.geometry)
+      pendingProbes.delete(message.sourceId)
       return
     }
 
     if (message.generation !== generation) return
 
     switch (message.type) {
-      case 'loaded':
-        width = message.width
-        height = message.height
-        rotation = message.rotation
-        durationMicros = message.durationMicros
-        canvas.width = width
-        canvas.height = height
-        currentMicros = 0
-        callbacks.onLoaded({ width, height, durationMicros })
-        send({ type: 'seek', generation, micros: 0 })
-        return
-
       case 'end':
         streamEnded = true
         return
@@ -240,7 +240,7 @@ export function createPlayer(
       case 'exported':
         exporting = false
         callbacks.onExportProgress(null)
-        callbacks.onExported(message.buffer, sourceName)
+        callbacks.onExported(message.buffer)
         return
 
       case 'frameCounts':
@@ -264,21 +264,49 @@ export function createPlayer(
   })
 
   return {
-    load(file: File) {
+    /** Opens a file in the worker and reports what the UI needs to add it. */
+    probeSource(sourceId: string, file: File): Promise<SourceGeometry> {
+      return new Promise((resolve) => {
+        pendingProbes.set(sourceId, resolve)
+        generation++
+        send({ type: 'probeSource', generation, sourceId, file })
+      })
+    },
+
+    /** Hands the worker the project it should render. */
+    setProject(next: Project) {
       stopLoop()
       generation++
       playing = false
       exporting = false
-      sourceName = file.name
-      callbacks.onExportProgress(null)
       streamEnded = false
       flushBuffer()
       resetStats()
-      send({ type: 'load', generation, file })
+
+      project = next
+      canvas.width = next.composition.width
+      canvas.height = next.composition.height
+
+      send({ type: 'setProject', generation, project: next })
+    },
+
+    /** Renders a single frame at a timeline position through the preview path. */
+    seek(timelineMicros: number) {
+      stopLoop()
+      generation++
+      if (playing) {
+        playing = false
+        callbacks.onPlayingChange(false)
+      }
+      flushBuffer()
+      send({ type: 'seek', generation, timelineMicros })
     },
 
     play() {
-      if (playing || exporting || durationMicros === 0) return
+      if (playing || exporting) return
+
+      const duration = timelineDuration(project)
+      if (duration === 0) return
 
       generation++
       streamEnded = false
@@ -286,7 +314,7 @@ export function createPlayer(
       resetStats()
 
       // Reaching the end and pressing play again restarts from the top.
-      if (currentMicros >= durationMicros) {
+      if (currentMicros >= duration) {
         currentMicros = 0
       }
 
@@ -296,7 +324,7 @@ export function createPlayer(
       wallStartMs = performance.now()
 
       callbacks.onPlayingChange(true)
-      send({ type: 'play', generation, fromMicros: currentMicros })
+      send({ type: 'play', generation, fromTimelineMicros: currentMicros })
       rafId = requestAnimationFrame(tick)
     },
 
@@ -312,9 +340,8 @@ export function createPlayer(
       logStats('paused')
     },
 
-    /** Renders a single frame at `micros` through the preview path. */
-    seek(micros: number) {
-      if (durationMicros === 0) return
+    exportMp4() {
+      if (exporting || timelineDuration(project) === 0) return
 
       stopLoop()
       generation++
@@ -323,7 +350,10 @@ export function createPlayer(
         callbacks.onPlayingChange(false)
       }
       flushBuffer()
-      send({ type: 'seek', generation, micros })
+
+      exporting = true
+      callbacks.onExportProgress(0)
+      send({ type: 'export', generation })
     },
 
     stats(): Stats {
@@ -336,23 +366,6 @@ export function createPlayer(
         pendingFrameCounts = resolve
         send({ type: 'frameCounts', generation })
       })
-    },
-
-    exportMp4() {
-      if (exporting || durationMicros === 0) return
-
-      // Playback and export share the decoder, so stop the loop first.
-      stopLoop()
-      generation++
-      if (playing) {
-        playing = false
-        callbacks.onPlayingChange(false)
-      }
-      flushBuffer()
-
-      exporting = true
-      callbacks.onExportProgress(0)
-      send({ type: 'export', generation })
     },
 
     destroy() {

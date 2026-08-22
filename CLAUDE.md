@@ -32,6 +32,10 @@
 - The test clip is committed at `tests/fixtures/`. Regenerate it with
   `npm run fixture`, which encodes it with WebCodecs in a real browser.
   Never use ffmpeg or ffmpeg.wasm, in tests or anywhere else.
+- Seek cost was measured on synthetic H.264 only (worst case 95ms, a
+  1280x720 clip with a single keyframe). Re-run
+  `node scripts/measure-seek.mjs` before trusting the decode buffer
+  margin on real camera footage, 60fps, or 4K.
 
 # Stack
 Vite + React + TypeScript, pixi.js, mediabunny, zustand + immer

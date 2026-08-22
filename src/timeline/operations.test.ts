@@ -3,6 +3,7 @@ import {
   addClip,
   addSource,
   clipAt,
+  setComposition,
   moveClip,
   removeClip,
   splitClipAt,
@@ -11,6 +12,7 @@ import {
   trimClipStart,
 } from './operations'
 import {
+  DEFAULT_COMPOSITION,
   clipDuration,
   clipEndMicros,
   emptyProject,
@@ -26,6 +28,7 @@ const source: Source = {
   durationMicros: 10 * SECOND,
   width: 320,
   height: 240,
+  rotation: 0,
 }
 
 const otherSource: Source = { ...source, id: 'src-b', name: 'b.mp4' }
@@ -545,5 +548,38 @@ describe('state shape', () => {
         clipEndMicros(ordered[i - 1]!),
       )
     }
+  })
+})
+
+describe('composition', () => {
+  it('starts at a usable default', () => {
+    expect(emptyProject().composition).toEqual(DEFAULT_COMPOSITION)
+  })
+
+  it('is a plain editable field, independent of the footage', () => {
+    // 9:16 over 320x240 landscape sources is a normal thing to want.
+    const project = setComposition(oneClip(), { width: 1080, height: 1920 })
+
+    expect(project.composition).toEqual({ width: 1080, height: 1920 })
+    expect(project.sources[source.id]!.width).toBe(320)
+    expect(clips(project)).toHaveLength(1)
+  })
+
+  it('rejects a non-positive or fractional size', () => {
+    expect(() => setComposition(emptyProject(), { width: 0, height: 100 })).toThrow(
+      /positive/,
+    )
+    expect(() =>
+      setComposition(emptyProject(), { width: -10, height: 100 }),
+    ).toThrow(/positive/)
+    expect(() =>
+      setComposition(emptyProject(), { width: 100.5, height: 100 }),
+    ).toThrow(/integer/)
+  })
+
+  it('survives serialization like the rest of the project', () => {
+    const project = setComposition(oneClip(), { width: 1080, height: 1080 })
+
+    expect(JSON.parse(JSON.stringify(project))).toEqual(project)
   })
 })

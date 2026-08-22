@@ -1,4 +1,5 @@
-import type { Rotation } from 'mediabunny'
+import { clipAt } from './timeline/operations'
+import type { Project, Rotation } from './timeline/types'
 
 export const MICROS_PER_SECOND = 1_000_000
 
@@ -36,13 +37,13 @@ export function takeFrame(sample: {
  * Returns `drawIndex: -1` when every buffered frame is still in the future.
  */
 export function selectFrame(
-  buffer: readonly { timestampMicros: number }[],
+  buffer: readonly { timelineMicros: number }[],
   targetMicros: number,
 ): { drawIndex: number; dropCount: number } {
   let drawIndex = -1
 
   for (let i = 0; i < buffer.length; i++) {
-    if (buffer[i]!.timestampMicros > targetMicros) break
+    if (buffer[i]!.timelineMicros > targetMicros) break
     drawIndex = i
   }
 
@@ -55,11 +56,43 @@ export type RenderContext =
   | OffscreenCanvasRenderingContext2D
 
 /**
- * THE render function. Draws a frame to fill a canvas of `width` x `height`
- * display pixels. Both the preview and the export call this and nothing else.
+ * THE render function. Given the project and a position on the timeline, paints
+ * exactly what should be on screen at that moment.
  *
- * A VideoFrame from mediabunny carries no rotation metadata (display
- * dimensions are pre-rotation), so the track rotation is applied here.
+ * Both the preview and the export call this and nothing else. If they ever
+ * diverge here, the golden-frame test fails, and that is the point.
+ *
+ * `frame` is whatever was decoded for this position, or null. Nothing is on the
+ * timeline at this position, or nothing decoded for it, means black - never a
+ * stale frame left over from the last paint.
+ */
+export function renderFrame(
+  context: RenderContext,
+  project: Project,
+  timelineMicros: number,
+  frame: CanvasImageSource | null,
+): void {
+  const { width, height } = project.composition
+  const found = clipAt(project, timelineMicros)
+
+  if (!found || !frame) {
+    context.save()
+    context.fillStyle = '#000000'
+    context.fillRect(0, 0, width, height)
+    context.restore()
+    return
+  }
+
+  const rotation = project.sources[found.clip.sourceId]?.rotation ?? 0
+  drawFrame(context, frame, width, height, rotation)
+}
+
+/**
+ * Draws one frame to fill the composition, applying the source's rotation.
+ *
+ * A VideoFrame from mediabunny carries no rotation metadata (its display
+ * dimensions are pre-rotation), so the rotation is applied here. Private to
+ * renderFrame in spirit; exported only so it can be tested directly.
  */
 export function drawFrame(
   context: RenderContext,
@@ -105,11 +138,11 @@ export function formatMicros(micros: number): string {
 
 /** Fraction of the export that is complete, as a value from 0 to 1. */
 export function exportProgress(
-  timestampMicros: number,
+  timelineMicros: number,
   durationMicros: number,
 ): number {
   if (durationMicros <= 0) return 0
-  return Math.min(1, Math.max(0, timestampMicros / durationMicros))
+  return Math.min(1, Math.max(0, timelineMicros / durationMicros))
 }
 
 /** Turns a source file name into the name the exported MP4 downloads as. */

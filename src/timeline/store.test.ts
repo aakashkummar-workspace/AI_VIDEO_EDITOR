@@ -17,6 +17,7 @@ const source: Source = {
   durationMicros: 10 * SECOND,
   width: 320,
   height: 240,
+  rotation: 0,
 }
 
 /**

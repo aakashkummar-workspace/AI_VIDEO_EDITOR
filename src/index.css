@@ -2,3 +2,65 @@ body {
   margin: 16px;
   font-family: sans-serif;
 }
+
+.timeline {
+  overflow-x: auto;
+  border: 1px solid #999;
+  margin-top: 12px;
+}
+
+.timeline-inner {
+  position: relative;
+  cursor: pointer;
+}
+
+.timeline-ruler {
+  position: relative;
+  height: 20px;
+  border-bottom: 1px solid #999;
+}
+
+.timeline-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid #999;
+}
+
+.timeline-tick-label {
+  font-size: 10px;
+  padding-left: 2px;
+  color: #333;
+}
+
+.timeline-track {
+  position: relative;
+  height: 44px;
+  background: #eee;
+}
+
+.timeline-clip {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  background: #ccd8ee;
+  border: 1px solid #667;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.timeline-clip-label {
+  font-size: 11px;
+  padding: 2px 4px;
+  display: block;
+  white-space: nowrap;
+}
+
+.timeline-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: red;
+  pointer-events: none;
+}
