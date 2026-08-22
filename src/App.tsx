@@ -6,8 +6,10 @@ import {
   applyDrag,
   dragPreviewMicros,
   dragToOperation,
+  findOverlay,
   type ClipDrag,
   type DragMode,
+  type DragTarget,
 } from './timeline/dragging'
 import {
   DEFAULT_PIXELS_PER_SECOND,
@@ -28,7 +30,11 @@ type ActiveDrag = {
   mode: DragMode
   startClientX: number
   moved: boolean
+  target: DragTarget
 }
+
+/** A new overlay lands mid-composition, visible, and lasting two seconds. */
+const NEW_OVERLAY_MICROS = 2_000_000
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -46,6 +52,10 @@ export default function App() {
   const [pixelsPerSecond, setPixelsPerSecond] = useState(
     DEFAULT_PIXELS_PER_SECOND,
   )
+  const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(
+    null,
+  )
+  const [overlayText, setOverlayText] = useState('Text')
 
   const dragRef = useRef<ActiveDrag | null>(null)
   /**
@@ -151,8 +161,14 @@ export default function App() {
 
   /** Starts a gesture. Preview updates happen on mousemove, below. */
   const handleClipGrab = useCallback(
-    (clipId: string, mode: DragMode, clientX: number) => {
-      dragRef.current = { clipId, mode, startClientX: clientX, moved: false }
+    (clipId: string, mode: DragMode, clientX: number, target: DragTarget) => {
+      dragRef.current = {
+        clipId,
+        mode,
+        startClientX: clientX,
+        moved: false,
+        target,
+      }
     },
     [],
   )
@@ -173,6 +189,7 @@ export default function App() {
         clipId: drag.clipId,
         mode: drag.mode,
         deltaMicros,
+        target: drag.target,
       }
       const preview = applyDrag(projectRef.current, gesture)
       previewTargetRef.current = dragPreviewMicros(preview, gesture)
@@ -197,6 +214,7 @@ export default function App() {
           event.clientX - drag.startClientX,
           zoomRef.current,
         ),
+        target: drag.target,
       }
       const operation = dragToOperation(projectRef.current, gesture)
       if (!operation) return
@@ -212,6 +230,15 @@ export default function App() {
             break
           case 'trim-end':
             store.trimClipEnd(operation.input)
+            break
+          case 'move-overlay':
+            store.moveOverlay(operation.input)
+            break
+          case 'trim-overlay-start':
+            store.trimOverlayStart(operation.input)
+            break
+          case 'trim-overlay-end':
+            store.trimOverlayEnd(operation.input)
             break
         }
       } catch (err) {
@@ -262,6 +289,25 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [currentMicros])
+
+  /** Drops a new overlay at the playhead, centred in the composition. */
+  function addOverlayAtPlayhead() {
+    const store = useTimelineStore.getState()
+    const { width, height } = store.project.composition
+    const id = crypto.randomUUID()
+
+    store.addOverlay({
+      id,
+      content: overlayText || 'Text',
+      x: Math.round(width * 0.1),
+      y: Math.round(height * 0.45),
+      sizePx: Math.max(12, Math.round(height * 0.12)),
+      color: '#ffffff',
+      timelineStartMicros: currentMicros,
+      durationMicros: NEW_OVERLAY_MICROS,
+    })
+    setSelectedOverlayId(id)
+  }
 
   /** Appends a clip covering the whole of a source, after everything else. */
   function appendClip(sourceId: string) {
@@ -320,6 +366,9 @@ export default function App() {
   const duration = timelineDuration(displayProject)
   const hasTimeline = duration > 0
   const sources = Object.values(displayProject.sources)
+  const selectedOverlay = selectedOverlayId
+    ? findOverlay(displayProject, selectedOverlayId)
+    : undefined
 
   /** Zooms so the whole timeline fits the visible strip. */
   function fitZoom() {
@@ -417,6 +466,104 @@ export default function App() {
         </p>
       )}
 
+      <p className="overlay-form">
+        <input
+          type="text"
+          value={overlayText}
+          data-testid="overlay-text"
+          onChange={(event) => {
+            setOverlayText(event.target.value)
+            if (selectedOverlay) {
+              useTimelineStore.getState().setOverlayStyle({
+                overlayId: selectedOverlay.id,
+                content: event.target.value,
+              })
+            }
+          }}
+        />{' '}
+        <button
+          type="button"
+          data-testid="add-overlay"
+          onClick={addOverlayAtPlayhead}
+          disabled={!hasTimeline}
+        >
+          Add text
+        </button>
+        {selectedOverlay && (
+          <>
+            {' '}
+            <label>
+              x{' '}
+              <input
+                type="number"
+                data-testid="overlay-x"
+                value={selectedOverlay.x}
+                onChange={(event) =>
+                  useTimelineStore.getState().setOverlayStyle({
+                    overlayId: selectedOverlay.id,
+                    x: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+            <label>
+              y{' '}
+              <input
+                type="number"
+                data-testid="overlay-y"
+                value={selectedOverlay.y}
+                onChange={(event) =>
+                  useTimelineStore.getState().setOverlayStyle({
+                    overlayId: selectedOverlay.id,
+                    y: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+            <label>
+              size{' '}
+              <input
+                type="number"
+                data-testid="overlay-size"
+                value={selectedOverlay.sizePx}
+                onChange={(event) =>
+                  useTimelineStore.getState().setOverlayStyle({
+                    overlayId: selectedOverlay.id,
+                    sizePx: Math.max(1, Number(event.target.value)),
+                  })
+                }
+              />
+            </label>
+            <label>
+              colour{' '}
+              <input
+                type="color"
+                data-testid="overlay-color"
+                value={selectedOverlay.color}
+                onChange={(event) =>
+                  useTimelineStore.getState().setOverlayStyle({
+                    overlayId: selectedOverlay.id,
+                    color: event.target.value,
+                  })
+                }
+              />
+            </label>{' '}
+            <button
+              type="button"
+              data-testid="remove-overlay"
+              onClick={() => {
+                useTimelineStore
+                  .getState()
+                  .removeOverlay(selectedOverlay.id)
+                setSelectedOverlayId(null)
+              }}
+            >
+              Remove
+            </button>
+          </>
+        )}
+      </p>
+
       <canvas ref={canvasRef} style={{ maxWidth: '100%' }} />
 
       <Timeline
@@ -432,6 +579,10 @@ export default function App() {
         onClipGrab={handleClipGrab}
         pixelsPerSecond={pixelsPerSecond}
         onZoom={setPixelsPerSecond}
+        selectedId={selectedOverlayId}
+        onSelect={(id, target) =>
+          setSelectedOverlayId(target === 'overlay' ? id : null)
+        }
       />
     </div>
   )

@@ -80,3 +80,29 @@ body {
   color: #555;
   font-size: 12px;
 }
+
+.timeline-overlays {
+  height: 26px;
+  background: #e7e2f0;
+  border-top: 1px solid #999;
+}
+
+.timeline-overlay {
+  background: #ded0f0;
+  top: 3px;
+  bottom: 3px;
+}
+
+.timeline-clip.is-selected {
+  outline: 2px solid #333;
+  outline-offset: -2px;
+}
+
+.overlay-form label {
+  margin-right: 8px;
+  font-size: 13px;
+}
+
+.overlay-form input[type='number'] {
+  width: 60px;
+}

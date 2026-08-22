@@ -9,29 +9,50 @@
 
 import {
   moveClip,
+  moveOverlay,
   trimClipEnd,
   trimClipStart,
+  trimOverlayEnd,
+  trimOverlayStart,
   type MoveClipInput,
+  type MoveOverlayInput,
+  type OverlayTrimInput,
   type TrimInput,
 } from './operations'
-import { clipDuration, clipEndMicros, type Clip, type Project } from './types'
+import {
+  clipDuration,
+  clipEndMicros,
+  overlayEndMicros,
+  type Clip,
+  type Overlay,
+  type Project,
+} from './types'
 
 /** How close to an edge counts as grabbing the edge rather than the clip. */
 export const EDGE_GRAB_PIXELS = 6
 
 export type DragMode = 'move' | 'trim-start' | 'trim-end'
 
+/** Which row the gesture is on. Clips and overlays edit by different rules. */
+export type DragTarget = 'clip' | 'overlay'
+
 export type ClipDrag = {
+  /** The id of the clip or overlay being dragged. */
   clipId: string
   mode: DragMode
   /** How far the mouse has moved since the gesture started. */
   deltaMicros: number
+  /** Defaults to the video track. */
+  target?: DragTarget
 }
 
 export type DragOperation =
   | { kind: 'move'; input: MoveClipInput }
   | { kind: 'trim-start'; input: TrimInput }
   | { kind: 'trim-end'; input: TrimInput }
+  | { kind: 'move-overlay'; input: MoveOverlayInput }
+  | { kind: 'trim-overlay-start'; input: OverlayTrimInput }
+  | { kind: 'trim-overlay-end'; input: OverlayTrimInput }
 
 /** Which part of a clip block the pointer is over. */
 export function clipZoneAt(
@@ -49,6 +70,59 @@ export function clipZoneAt(
 
 export function findClip(project: Project, clipId: string): Clip | undefined {
   return project.videoTrack.clips.find((clip) => clip.id === clipId)
+}
+
+export function findOverlay(
+  project: Project,
+  overlayId: string,
+): Overlay | undefined {
+  return project.overlays.find((overlay) => overlay.id === overlayId)
+}
+
+/**
+ * An overlay gesture. Overlays may sit on top of one another, so unlike a clip
+ * there is no neighbour to stop at - only the start of the timeline and a
+ * positive duration, both of which the operations already clamp.
+ */
+function overlayDragToOperation(
+  project: Project,
+  drag: ClipDrag,
+): DragOperation | null {
+  const overlay = findOverlay(project, drag.clipId)
+  if (!overlay) return null
+
+  if (drag.mode === 'move') {
+    const timelineStartMicros = Math.max(
+      0,
+      Math.round(overlay.timelineStartMicros + drag.deltaMicros),
+    )
+    if (timelineStartMicros === overlay.timelineStartMicros) return null
+
+    return {
+      kind: 'move-overlay',
+      input: { overlayId: drag.clipId, timelineStartMicros },
+    }
+  }
+
+  if (drag.mode === 'trim-start') {
+    return {
+      kind: 'trim-overlay-start',
+      input: {
+        overlayId: drag.clipId,
+        timelineMicros: Math.round(
+          overlay.timelineStartMicros + drag.deltaMicros,
+        ),
+      },
+    }
+  }
+
+  return {
+    kind: 'trim-overlay-end',
+    input: {
+      overlayId: drag.clipId,
+      timelineMicros: Math.round(overlayEndMicros(overlay) + drag.deltaMicros),
+    },
+  }
 }
 
 /**
@@ -98,6 +172,8 @@ export function dragToOperation(
   project: Project,
   drag: ClipDrag,
 ): DragOperation | null {
+  if (drag.target === 'overlay') return overlayDragToOperation(project, drag)
+
   const clip = findClip(project, drag.clipId)
   if (!clip) return null
 
@@ -150,6 +226,12 @@ export function applyDrag(project: Project, drag: ClipDrag): Project {
         return trimClipStart(project, operation.input)
       case 'trim-end':
         return trimClipEnd(project, operation.input)
+      case 'move-overlay':
+        return moveOverlay(project, operation.input)
+      case 'trim-overlay-start':
+        return trimOverlayStart(project, operation.input)
+      case 'trim-overlay-end':
+        return trimOverlayEnd(project, operation.input)
     }
   } catch {
     return project
@@ -161,11 +243,18 @@ export function dragPreviewMicros(
   previewProject: Project,
   drag: ClipDrag,
 ): number | null {
-  const clip = findClip(previewProject, drag.clipId)
-  if (!clip) return null
+  const item =
+    drag.target === 'overlay'
+      ? findOverlay(previewProject, drag.clipId)
+      : findClip(previewProject, drag.clipId)
+  if (!item) return null
+
+  const start = item.timelineStartMicros
+  const end =
+    drag.target === 'overlay'
+      ? overlayEndMicros(item as Overlay)
+      : clipEndMicros(item as Clip)
 
   // The tail is exclusive, so step inside it to show the last frame.
-  return drag.mode === 'trim-end'
-    ? Math.max(clip.timelineStartMicros, clipEndMicros(clip) - 1)
-    : clip.timelineStartMicros
+  return drag.mode === 'trim-end' ? Math.max(start, end - 1) : start
 }

@@ -1,5 +1,10 @@
-import { clipAt } from './timeline/operations'
-import type { Project, Rotation } from './timeline/types'
+import { clipAt, overlaysAt } from './timeline/operations'
+import {
+  OVERLAY_FONT_FAMILY,
+  type Overlay,
+  type Project,
+  type Rotation,
+} from './timeline/types'
 
 export const MICROS_PER_SECOND = 1_000_000
 
@@ -98,6 +103,8 @@ export function fitRect(
  * The composition is always cleared to black first, so a gap, a frame that
  * failed to decode, and the letterbox bars beside a source of a different
  * shape are all the same thing: black, never a stale frame from the last paint.
+ * Text overlays are drawn here too, for the same reason: one path, or the
+ * preview and the export can disagree.
  */
 export function renderFrame(
   context: RenderContext,
@@ -113,17 +120,35 @@ export function renderFrame(
   context.restore()
 
   const found = clipAt(project, timelineMicros)
-  if (!found || !frame) return
+  const source = found ? project.sources[found.clip.sourceId] : undefined
 
-  const source = project.sources[found.clip.sourceId]
-  if (!source) return
+  if (found && frame && source) {
+    drawFrame(
+      context,
+      frame,
+      fitRect(source.width, source.height, width, height),
+      source.rotation,
+    )
+  }
 
-  drawFrame(
-    context,
-    frame,
-    fitRect(source.width, source.height, width, height),
-    source.rotation,
-  )
+  // Overlays sit on top of whatever the picture turned out to be - including
+  // black, so an overlay over a gap still shows. Same call in the preview and
+  // in the export, because there is only the one render function.
+  for (const overlay of overlaysAt(project, timelineMicros)) {
+    drawOverlay(context, overlay)
+  }
+}
+
+/** Draws one text overlay at its place in the composition. */
+export function drawOverlay(context: RenderContext, overlay: Overlay): void {
+  if (overlay.content.length === 0 || overlay.sizePx <= 0) return
+
+  context.save()
+  context.font = `${overlay.sizePx}px ${OVERLAY_FONT_FAMILY}`
+  context.fillStyle = overlay.color
+  context.textBaseline = 'top'
+  context.fillText(overlay.content, overlay.x, overlay.y)
+  context.restore()
 }
 
 /**

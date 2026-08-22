@@ -4,12 +4,16 @@ import {
   mutators,
   type AddClipInput,
   type MoveClipInput,
+  type MoveOverlayInput,
+  type OverlayStyleInput,
+  type OverlayTrimInput,
   type SplitClipInput,
   type TrimInput,
 } from './operations'
 import {
   emptyProject,
   type Composition,
+  type Overlay,
   type Project,
   type Source,
 } from './types'
@@ -38,6 +42,13 @@ export type TimelineStore = {
   trimClipStart: (input: TrimInput) => void
   trimClipEnd: (input: TrimInput) => void
   splitClipAt: (input: SplitClipInput) => void
+
+  addOverlay: (overlay: Overlay) => void
+  removeOverlay: (overlayId: string) => void
+  moveOverlay: (input: MoveOverlayInput) => void
+  trimOverlayStart: (input: OverlayTrimInput) => void
+  trimOverlayEnd: (input: OverlayTrimInput) => void
+  setOverlayStyle: (input: OverlayStyleInput) => void
 
   undo: () => void
   redo: () => void
@@ -90,6 +101,13 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     trimClipStart: (input) => apply(mutators.trimClipStart, input),
     trimClipEnd: (input) => apply(mutators.trimClipEnd, input),
     splitClipAt: (input) => apply(mutators.splitClipAt, input),
+
+    addOverlay: (overlay) => apply(mutators.addOverlay, overlay),
+    removeOverlay: (overlayId) => apply(mutators.removeOverlay, overlayId),
+    moveOverlay: (input) => apply(mutators.moveOverlay, input),
+    trimOverlayStart: (input) => apply(mutators.trimOverlayStart, input),
+    trimOverlayEnd: (input) => apply(mutators.trimOverlayEnd, input),
+    setOverlayStyle: (input) => apply(mutators.setOverlayStyle, input),
 
     undo: () => {
       const { project, past, future } = get()

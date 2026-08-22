@@ -1,10 +1,13 @@
 import { produce } from 'immer'
 import {
   MIN_CLIP_MICROS,
+  MIN_OVERLAY_MICROS,
   clipDuration,
   clipEndMicros,
+  overlayEndMicros,
   type Clip,
   type Composition,
+  type Overlay,
   type Project,
   type Source,
 } from './types'
@@ -39,6 +42,20 @@ function requireSource(project: Project, sourceId: string): Source {
     throw new Error(`No source with id ${sourceId}.`)
   }
   return source
+}
+
+function overlayIndexById(project: Project, overlayId: string): number {
+  const index = project.overlays.findIndex(
+    (overlay) => overlay.id === overlayId,
+  )
+  if (index < 0) {
+    throw new Error(`No overlay with id ${overlayId}.`)
+  }
+  return index
+}
+
+function sortOverlays(project: Project): void {
+  project.overlays.sort((a, b) => a.timelineStartMicros - b.timelineStartMicros)
 }
 
 function sortClips(project: Project): void {
@@ -83,6 +100,26 @@ export type TrimInput = {
 export type MoveClipInput = {
   clipId: string
   timelineStartMicros: number
+}
+
+export type MoveOverlayInput = {
+  overlayId: string
+  timelineStartMicros: number
+}
+
+export type OverlayTrimInput = {
+  overlayId: string
+  timelineMicros: number
+}
+
+/** The editable look of an overlay: everything except when it plays. */
+export type OverlayStyleInput = {
+  overlayId: string
+  content?: string
+  x?: number
+  y?: number
+  sizePx?: number
+  color?: string
 }
 
 export const mutators = {
@@ -217,6 +254,84 @@ export const mutators = {
     clip.sourceOutMicros = clip.sourceInMicros + duration
   },
 
+  addOverlay(project: Project, overlay: Overlay): void {
+    assertIntegerMicros(overlay.timelineStartMicros, 'timelineStartMicros')
+    assertIntegerMicros(overlay.durationMicros, 'durationMicros')
+
+    if (project.overlays.some((existing) => existing.id === overlay.id)) {
+      throw new Error(`An overlay with id ${overlay.id} already exists.`)
+    }
+    if (overlay.timelineStartMicros < 0) {
+      throw new Error(
+        'An overlay cannot start before the beginning of the timeline.',
+      )
+    }
+    if (overlay.durationMicros < MIN_OVERLAY_MICROS) {
+      throw new Error('An overlay must have a positive duration.')
+    }
+    if (overlay.sizePx <= 0) {
+      throw new Error('An overlay must have a positive size.')
+    }
+
+    project.overlays.push({ ...overlay })
+    sortOverlays(project)
+  },
+
+  removeOverlay(project: Project, overlayId: string): void {
+    project.overlays.splice(overlayIndexById(project, overlayId), 1)
+  },
+
+  /** Overlays may sit on top of one another, so this only clamps to zero. */
+  moveOverlay(project: Project, args: MoveOverlayInput): void {
+    assertIntegerMicros(args.timelineStartMicros, 'timelineStartMicros')
+
+    const overlay = project.overlays[overlayIndexById(project, args.overlayId)]!
+    overlay.timelineStartMicros = Math.max(0, args.timelineStartMicros)
+    sortOverlays(project)
+  },
+
+  /** Drags the head, holding the tail still. */
+  trimOverlayStart(project: Project, args: OverlayTrimInput): void {
+    assertIntegerMicros(args.timelineMicros, 'timelineMicros')
+
+    const overlay = project.overlays[overlayIndexById(project, args.overlayId)]!
+    const end = overlayEndMicros(overlay)
+    const start = Math.min(
+      Math.max(0, args.timelineMicros),
+      end - MIN_OVERLAY_MICROS,
+    )
+
+    overlay.timelineStartMicros = start
+    overlay.durationMicros = end - start
+    sortOverlays(project)
+  },
+
+  /** Drags the tail, holding the head still. */
+  trimOverlayEnd(project: Project, args: OverlayTrimInput): void {
+    assertIntegerMicros(args.timelineMicros, 'timelineMicros')
+
+    const overlay = project.overlays[overlayIndexById(project, args.overlayId)]!
+    overlay.durationMicros = Math.max(
+      MIN_OVERLAY_MICROS,
+      args.timelineMicros - overlay.timelineStartMicros,
+    )
+  },
+
+  setOverlayStyle(project: Project, args: OverlayStyleInput): void {
+    const overlay = project.overlays[overlayIndexById(project, args.overlayId)]!
+
+    if (args.content !== undefined) overlay.content = args.content
+    if (args.color !== undefined) overlay.color = args.color
+    if (args.x !== undefined) overlay.x = Math.round(args.x)
+    if (args.y !== undefined) overlay.y = Math.round(args.y)
+    if (args.sizePx !== undefined) {
+      if (args.sizePx <= 0) {
+        throw new Error('An overlay must have a positive size.')
+      }
+      overlay.sizePx = Math.round(args.sizePx)
+    }
+  },
+
   /**
    * Cuts the clip under `timelineMicros` in two. A cut in empty space, or
    * exactly on a clip boundary, is a no-op: neither half may be empty.
@@ -279,11 +394,52 @@ export const trimClipEnd = (project: Project, args: TrimInput): Project =>
 export const splitClipAt = (project: Project, input: SplitClipInput): Project =>
   produce(project, (draft) => mutators.splitClipAt(draft, input))
 
-/** Exclusive end of the last clip, or 0 for an empty timeline. */
+export const addOverlay = (project: Project, overlay: Overlay): Project =>
+  produce(project, (draft) => mutators.addOverlay(draft, overlay))
+
+export const removeOverlay = (project: Project, overlayId: string): Project =>
+  produce(project, (draft) => mutators.removeOverlay(draft, overlayId))
+
+export const moveOverlay = (project: Project, args: MoveOverlayInput): Project =>
+  produce(project, (draft) => mutators.moveOverlay(draft, args))
+
+export const trimOverlayStart = (
+  project: Project,
+  args: OverlayTrimInput,
+): Project => produce(project, (draft) => mutators.trimOverlayStart(draft, args))
+
+export const trimOverlayEnd = (
+  project: Project,
+  args: OverlayTrimInput,
+): Project => produce(project, (draft) => mutators.trimOverlayEnd(draft, args))
+
+export const setOverlayStyle = (
+  project: Project,
+  args: OverlayStyleInput,
+): Project => produce(project, (draft) => mutators.setOverlayStyle(draft, args))
+
+/** Which overlays are showing at `timelineMicros`, in draw order. */
+export function overlaysAt(project: Project, timelineMicros: number): Overlay[] {
+  return project.overlays.filter(
+    (overlay) =>
+      overlay.timelineStartMicros <= timelineMicros &&
+      timelineMicros < overlayEndMicros(overlay),
+  )
+}
+
+
+/**
+ * Exclusive end of the timeline: the last clip or overlay, whichever runs
+ * longer. An overlay past the final clip still has to be playable.
+ */
 export function timelineDuration(project: Project): number {
-  return project.videoTrack.clips.reduce(
+  const clipsEnd = project.videoTrack.clips.reduce(
     (end, clip) => Math.max(end, clipEndMicros(clip)),
     0,
+  )
+  return project.overlays.reduce(
+    (end, overlay) => Math.max(end, overlayEndMicros(overlay)),
+    clipsEnd,
   )
 }
 

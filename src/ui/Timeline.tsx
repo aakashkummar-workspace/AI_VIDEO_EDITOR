@@ -9,7 +9,11 @@ import {
   zoomAround,
   ZOOM_STEP,
 } from '../timeline/layout'
-import { clipZoneAt, type DragMode } from '../timeline/dragging'
+import {
+  clipZoneAt,
+  type DragMode,
+  type DragTarget,
+} from '../timeline/dragging'
 import { timelineDuration } from '../timeline/operations'
 import { clipDuration, type Project } from '../timeline/types'
 
@@ -18,7 +22,15 @@ export type TimelineProps = {
   /** Playhead position, in timeline microseconds. */
   currentMicros: number
   onSeek: (timelineMicros: number) => void
-  onClipGrab: (clipId: string, mode: DragMode, clientX: number) => void
+  onClipGrab: (
+    itemId: string,
+    mode: DragMode,
+    clientX: number,
+    target: DragTarget,
+  ) => void
+  /** Which clip or overlay is selected, if any. */
+  selectedId?: string | null
+  onSelect?: (id: string | null, target: DragTarget) => void
   pixelsPerSecond?: number
   /** Reports a zoom the timeline initiated, e.g. ctrl+wheel. */
   onZoom?: (pixelsPerSecond: number) => void | undefined
@@ -38,6 +50,8 @@ export default function Timeline({
   onClipGrab,
   pixelsPerSecond = DEFAULT_PIXELS_PER_SECOND,
   onZoom = () => {},
+  selectedId = null,
+  onSelect = () => {},
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -126,12 +140,45 @@ export default function Timeline({
               }}
               onMouseDown={(event) => {
                 event.preventDefault()
-                onClipGrab(clip.id, zoneFor(event), event.clientX)
+                onSelect(clip.id, 'clip')
+                onClipGrab(clip.id, zoneFor(event), event.clientX, 'clip')
               }}
             >
               <span className="timeline-clip-label">
                 {project.sources[clip.sourceId]?.name ?? clip.sourceId}
               </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="timeline-track timeline-overlays">
+          {project.overlays.map((overlay) => (
+            <div
+              key={overlay.id}
+              className={
+                overlay.id === selectedId
+                  ? 'timeline-clip timeline-overlay is-selected'
+                  : 'timeline-clip timeline-overlay'
+              }
+              data-testid="overlay-block"
+              data-overlay-id={overlay.id}
+              style={{
+                left: microsToPixels(
+                  overlay.timelineStartMicros,
+                  pixelsPerSecond,
+                ),
+                width: microsToPixels(overlay.durationMicros, pixelsPerSecond),
+              }}
+              onMouseMove={(event) => {
+                event.currentTarget.style.cursor = CURSOR_FOR[zoneFor(event)]
+              }}
+              onMouseDown={(event) => {
+                event.preventDefault()
+                onSelect(overlay.id, 'overlay')
+                onClipGrab(overlay.id, zoneFor(event), event.clientX, 'overlay')
+              }}
+            >
+              <span className="timeline-clip-label">{overlay.content}</span>
             </div>
           ))}
         </div>
