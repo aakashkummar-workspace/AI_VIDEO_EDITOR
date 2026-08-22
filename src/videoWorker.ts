@@ -12,6 +12,7 @@ import {
   type InputVideoTrack,
   type Rotation,
 } from 'mediabunny'
+import { frameCounts, installFrameTracking } from './frameTracker'
 import {
   drawFrame,
   exportProgress,
@@ -27,11 +28,16 @@ import {
 
 // The DOM lib types `self` as a Window; this is the worker surface we use.
 const scope = self as unknown as {
+  name: string
   postMessage(message: WorkerToMain, transfer?: Transferable[]): void
   addEventListener(
     type: 'message',
     listener: (event: MessageEvent<MainToWorker>) => void,
   ): void
+}
+
+if (scope.name === 'instrumented') {
+  installFrameTracking('worker')
 }
 
 let track: InputVideoTrack | null = null
@@ -300,6 +306,14 @@ scope.addEventListener('message', (event) => {
     case 'export':
       releasePump()
       void run(() => exportMp4(message.generation))
+      return
+
+    case 'frameCounts':
+      scope.postMessage({
+        type: 'frameCounts',
+        generation: message.generation,
+        counts: frameCounts(),
+      })
       return
 
     case 'stop':

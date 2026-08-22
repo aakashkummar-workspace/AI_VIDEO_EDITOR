@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
@@ -8,4 +8,8 @@ export default defineConfig({
   // it picks up C:\Users\Welcome-Pc\postcss.config.js (Tailwind + autoprefixer),
   // which has nothing to do with this project.
   css: { postcss: {} },
+  test: {
+    // tests/ holds the Playwright browser suite; vitest only runs unit tests.
+    include: ['src/**/*.test.ts'],
+  },
 })

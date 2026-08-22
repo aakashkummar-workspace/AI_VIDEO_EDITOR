@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { createPlayer, type LoadedInfo } from './player'
-import { formatMicros } from './playback'
+import { exportFileName, formatMicros } from './playback'
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -23,6 +23,16 @@ export default function App() {
       onPlayingChange: setPlaying,
       onExportProgress: (progress) =>
         setExportPercent(progress === null ? null : Math.round(progress * 100)),
+      onExported: (buffer, sourceName) => {
+        const url = URL.createObjectURL(new Blob([buffer], { type: 'video/mp4' }))
+        const link = document.createElement('a')
+        link.href = url
+        link.download = exportFileName(sourceName)
+        link.click()
+
+        // Revoking immediately can cancel the download in some browsers.
+        setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      },
       onError: setError,
     })
     playerRef.current = player

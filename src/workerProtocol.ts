@@ -15,6 +15,7 @@ export type MainToWorker =
   | { type: 'stop'; generation: number }
   | { type: 'consumed'; generation: number; count: number }
   | { type: 'export'; generation: number }
+  | { type: 'frameCounts'; generation: number }
 
 export type WorkerToMain =
   | {
@@ -35,4 +36,9 @@ export type WorkerToMain =
   | { type: 'end'; generation: number }
   | { type: 'exportProgress'; generation: number; progress: number }
   | { type: 'exported'; generation: number; buffer: ArrayBuffer }
+  | {
+      type: 'frameCounts'
+      generation: number
+      counts: { created: number; closed: number }
+    }
   | { type: 'error'; generation: number; message: string }

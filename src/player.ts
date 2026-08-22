@@ -1,5 +1,6 @@
 import type { Rotation } from 'mediabunny'
-import { drawFrame, exportFileName, selectFrame } from './playback'
+import { frameCounts, installFrameTracking } from './frameTracker'
+import { drawFrame, selectFrame } from './playback'
 import type { MainToWorker, WorkerToMain } from './workerProtocol'
 
 export type LoadedInfo = {
@@ -14,7 +15,14 @@ export type PlayerCallbacks = {
   onPlayingChange: (playing: boolean) => void
   /** Export progress from 0 to 1, or null when no export is running. */
   onExportProgress: (progress: number | null) => void
+  /** The finished MP4. The caller decides what to do with it. */
+  onExported: (buffer: ArrayBuffer, sourceName: string) => void
   onError: (message: string) => void
+}
+
+export type PlayerOptions = {
+  /** Test-only: count VideoFrame creations and closes on both threads. */
+  instrument?: boolean
 }
 
 type BufferedFrame = { timestampMicros: number; frame: VideoFrame }
@@ -35,9 +43,15 @@ const STATS_LOG_INTERVAL_MS = 1000
 export function createPlayer(
   canvas: HTMLCanvasElement,
   callbacks: PlayerCallbacks,
+  options: PlayerOptions = {},
 ) {
+  if (options.instrument) {
+    installFrameTracking('main')
+  }
+
   const worker = new Worker(new URL('./videoWorker.ts', import.meta.url), {
     type: 'module',
+    name: options.instrument ? 'instrumented' : 'video-worker',
   })
 
   const buffer: BufferedFrame[] = []
@@ -62,6 +76,12 @@ export function createPlayer(
 
   let stats: Stats = { decoded: 0, drawn: 0, dropped: 0, peakBuffer: 0 }
   let lastStatsLogMs = 0
+
+  type FrameCountReport = {
+    worker: { created: number; closed: number }
+    main: { created: number; closed: number }
+  }
+  let pendingFrameCounts: ((report: FrameCountReport) => void) | null = null
 
   function send(message: MainToWorker, transfer: Transferable[] = []) {
     worker.postMessage(message, transfer)
@@ -169,18 +189,6 @@ export function createPlayer(
     rafId = requestAnimationFrame(tick)
   }
 
-  /** Hands the finished MP4 to the browser as a download. */
-  function download(buffer: ArrayBuffer) {
-    const url = URL.createObjectURL(new Blob([buffer], { type: 'video/mp4' }))
-    const link = document.createElement('a')
-    link.href = url
-    link.download = exportFileName(sourceName)
-    link.click()
-
-    // Revoking immediately can cancel the download in some browsers.
-    setTimeout(() => URL.revokeObjectURL(url), 10_000)
-  }
-
   worker.addEventListener('message', (event: MessageEvent<WorkerToMain>) => {
     const message = event.data
 
@@ -231,8 +239,13 @@ export function createPlayer(
 
       case 'exported':
         exporting = false
-        download(message.buffer)
         callbacks.onExportProgress(null)
+        callbacks.onExported(message.buffer, sourceName)
+        return
+
+      case 'frameCounts':
+        pendingFrameCounts?.({ worker: message.counts, main: frameCounts() })
+        pendingFrameCounts = null
         return
 
       case 'error':
@@ -297,6 +310,32 @@ export function createPlayer(
       flushBuffer()
       callbacks.onPlayingChange(false)
       logStats('paused')
+    },
+
+    /** Renders a single frame at `micros` through the preview path. */
+    seek(micros: number) {
+      if (durationMicros === 0) return
+
+      stopLoop()
+      generation++
+      if (playing) {
+        playing = false
+        callbacks.onPlayingChange(false)
+      }
+      flushBuffer()
+      send({ type: 'seek', generation, micros })
+    },
+
+    stats(): Stats {
+      return { ...stats }
+    },
+
+    /** Test-only: resolves with the VideoFrame counts from both threads. */
+    frameCounts(): Promise<FrameCountReport> {
+      return new Promise((resolve) => {
+        pendingFrameCounts = resolve
+        send({ type: 'frameCounts', generation })
+      })
     },
 
     exportMp4() {
