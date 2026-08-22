@@ -378,17 +378,23 @@ input[type='color'] {
 }
 
 /*
- * The head. Drawn as a pseudo-element so the playhead element keeps its own
- * one-pixel box, and purely visual: making it draggable would be behaviour,
- * which this change deliberately does not touch.
+ * The head. A real element rather than a pseudo-element so it can take the
+ * pointer, since the line itself deliberately does not. Absolutely positioned,
+ * so it does not widen the playhead's own one-pixel box.
  */
-.timeline-playhead::before {
-  content: '';
+.timeline-playhead-head {
   position: absolute;
   top: 0;
+  /* Even width against a 6px offset, so the head centres on the line. */
   left: -6px;
-  width: 13px;
+  width: 12px;
   height: 11px;
   background: var(--playhead);
   border-radius: 2px 2px 6px 6px;
+  pointer-events: auto;
+  cursor: ew-resize;
+}
+
+.timeline-playhead-head:hover {
+  transform: scale(1.15);
 }

@@ -14,6 +14,7 @@ import {
 import {
   DEFAULT_PIXELS_PER_SECOND,
   ZOOM_STEP,
+  clampToTimeline,
   clampZoom,
   fitPixelsPerSecond,
   pixelsToMicros,
@@ -58,6 +59,10 @@ export default function App() {
   const [overlayText, setOverlayText] = useState('Text')
 
   const dragRef = useRef<ActiveDrag | null>(null)
+  /** A scrub in progress: where it was grabbed, and from what position. */
+  const scrubRef = useRef<{ startClientX: number; startMicros: number } | null>(
+    null,
+  )
   /**
    * The committed project, for the window-level mouse handlers. They are bound
    * once, so they cannot close over the current value; and a gesture is always
@@ -159,6 +164,17 @@ export default function App() {
     [seek],
   )
 
+  /** Grabs the playhead head, to scrub. */
+  const handlePlayheadGrab = useCallback(
+    (clientX: number) => {
+      scrubRef.current = {
+        startClientX: clientX,
+        startMicros: currentMicrosRef.current,
+      }
+    },
+    [],
+  )
+
   /** Starts a gesture. Preview updates happen on mousemove, below. */
   const handleClipGrab = useCallback(
     (clipId: string, mode: DragMode, clientX: number, target: DragTarget) => {
@@ -175,6 +191,23 @@ export default function App() {
 
   useEffect(() => {
     function onMouseMove(event: globalThis.MouseEvent) {
+      const scrub = scrubRef.current
+      if (scrub) {
+        // Measured as a delta from where the head was grabbed, like every
+        // other gesture, so it survives the strip being scrolled mid-drag.
+        const micros = clampToTimeline(
+          scrub.startMicros +
+            pixelsToMicros(event.clientX - scrub.startClientX, zoomRef.current),
+          timelineDuration(projectRef.current),
+        )
+        if (micros !== currentMicrosRef.current) {
+          currentMicrosRef.current = micros
+          setCurrentMicros(micros)
+          playerRef.current?.seek(micros)
+        }
+        return
+      }
+
       const drag = dragRef.current
       if (!drag) return
 
@@ -197,6 +230,13 @@ export default function App() {
     }
 
     function onMouseUp(event: globalThis.MouseEvent) {
+      if (scrubRef.current) {
+        scrubRef.current = null
+        // The mouseup would otherwise reach the track as a click and seek back.
+        swallowNextSeekRef.current = true
+        return
+      }
+
       const drag = dragRef.current
       if (!drag) return
       dragRef.current = null
@@ -619,6 +659,7 @@ export default function App() {
           onSelect={(id, target) =>
             setSelectedOverlayId(target === 'overlay' ? id : null)
           }
+          onPlayheadGrab={handlePlayheadGrab}
         />
       </footer>
     </div>

@@ -31,6 +31,8 @@ export type TimelineProps = {
   /** Which clip or overlay is selected, if any. */
   selectedId?: string | null
   onSelect?: (id: string | null, target: DragTarget) => void
+  /** The playhead head was grabbed, to scrub. */
+  onPlayheadGrab?: (clientX: number) => void
   pixelsPerSecond?: number
   /** Reports a zoom the timeline initiated, e.g. ctrl+wheel. */
   onZoom?: (pixelsPerSecond: number) => void | undefined
@@ -52,6 +54,7 @@ export default function Timeline({
   onZoom = () => {},
   selectedId = null,
   onSelect = () => {},
+  onPlayheadGrab = () => {},
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -187,7 +190,18 @@ export default function Timeline({
           className="timeline-playhead"
           data-testid="playhead"
           style={{ left: microsToPixels(currentMicros, pixelsPerSecond) }}
-        />
+        >
+          {/* The line ignores the pointer; only the head is grabbable. */}
+          <div
+            className="timeline-playhead-head"
+            data-testid="playhead-head"
+            onMouseDown={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              onPlayheadGrab(event.clientX)
+            }}
+          />
+        </div>
       </div>
     </div>
   )
