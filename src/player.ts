@@ -1,5 +1,5 @@
 import type { Rotation } from 'mediabunny'
-import { drawFrame, selectFrame } from './playback'
+import { drawFrame, exportFileName, selectFrame } from './playback'
 import type { MainToWorker, WorkerToMain } from './workerProtocol'
 
 export type LoadedInfo = {
@@ -12,6 +12,8 @@ export type PlayerCallbacks = {
   onLoaded: (info: LoadedInfo) => void
   onTime: (micros: number) => void
   onPlayingChange: (playing: boolean) => void
+  /** Export progress from 0 to 1, or null when no export is running. */
+  onExportProgress: (progress: number | null) => void
   onError: (message: string) => void
 }
 
@@ -47,6 +49,8 @@ export function createPlayer(
   let durationMicros = 0
 
   let playing = false
+  let exporting = false
+  let sourceName = 'video'
   let streamEnded = false
   let currentMicros = 0
   let rafId: number | null = null
@@ -165,6 +169,18 @@ export function createPlayer(
     rafId = requestAnimationFrame(tick)
   }
 
+  /** Hands the finished MP4 to the browser as a download. */
+  function download(buffer: ArrayBuffer) {
+    const url = URL.createObjectURL(new Blob([buffer], { type: 'video/mp4' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = exportFileName(sourceName)
+    link.click()
+
+    // Revoking immediately can cancel the download in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  }
+
   worker.addEventListener('message', (event: MessageEvent<WorkerToMain>) => {
     const message = event.data
 
@@ -209,9 +225,21 @@ export function createPlayer(
         streamEnded = true
         return
 
+      case 'exportProgress':
+        callbacks.onExportProgress(message.progress)
+        return
+
+      case 'exported':
+        exporting = false
+        download(message.buffer)
+        callbacks.onExportProgress(null)
+        return
+
       case 'error':
         stopLoop()
         playing = false
+        exporting = false
+        callbacks.onExportProgress(null)
         callbacks.onPlayingChange(false)
         callbacks.onError(message.message)
         return
@@ -227,6 +255,9 @@ export function createPlayer(
       stopLoop()
       generation++
       playing = false
+      exporting = false
+      sourceName = file.name
+      callbacks.onExportProgress(null)
       streamEnded = false
       flushBuffer()
       resetStats()
@@ -234,7 +265,7 @@ export function createPlayer(
     },
 
     play() {
-      if (playing || durationMicros === 0) return
+      if (playing || exporting || durationMicros === 0) return
 
       generation++
       streamEnded = false
@@ -266,6 +297,23 @@ export function createPlayer(
       flushBuffer()
       callbacks.onPlayingChange(false)
       logStats('paused')
+    },
+
+    exportMp4() {
+      if (exporting || durationMicros === 0) return
+
+      // Playback and export share the decoder, so stop the loop first.
+      stopLoop()
+      generation++
+      if (playing) {
+        playing = false
+        callbacks.onPlayingChange(false)
+      }
+      flushBuffer()
+
+      exporting = true
+      callbacks.onExportProgress(0)
+      send({ type: 'export', generation })
     },
 
     destroy() {

@@ -1,11 +1,24 @@
 import {
   ALL_FORMATS,
   BlobSource,
+  BufferTarget,
+  CanvasSource,
   Input,
+  Mp4OutputFormat,
+  Output,
+  QUALITY_HIGH,
   VideoSampleSink,
+  getFirstEncodableVideoCodec,
   type InputVideoTrack,
+  type Rotation,
 } from 'mediabunny'
-import { microsToSeconds, secondsToMicros, takeFrame } from './playback'
+import {
+  drawFrame,
+  exportProgress,
+  microsToSeconds,
+  secondsToMicros,
+  takeFrame,
+} from './playback'
 import {
   BUFFER_TARGET,
   type MainToWorker,
@@ -23,6 +36,8 @@ const scope = self as unknown as {
 
 let track: InputVideoTrack | null = null
 let sink: VideoSampleSink | null = null
+let geometry: { width: number; height: number; rotation: Rotation } | null =
+  null
 
 /** Bumped by the UI thread on every play/seek/stop; stale work is abandoned. */
 let generation = 0
@@ -56,13 +71,16 @@ async function load(file: File) {
 
   track = videoTrack
   sink = new VideoSampleSink(videoTrack)
+  geometry = {
+    width: await videoTrack.getDisplayWidth(),
+    height: await videoTrack.getDisplayHeight(),
+    rotation: await videoTrack.getRotation(),
+  }
 
   scope.postMessage({
     type: 'loaded',
     generation,
-    width: await videoTrack.getDisplayWidth(),
-    height: await videoTrack.getDisplayHeight(),
-    rotation: await videoTrack.getRotation(),
+    ...geometry,
     durationMicros: secondsToMicros(await videoTrack.computeDuration()),
   })
 }
@@ -156,6 +174,110 @@ async function play(fromMicros: number, myGeneration: number) {
   }
 }
 
+/**
+ * Re-renders every frame through the same drawFrame() the preview uses, into an
+ * OffscreenCanvas, and encodes the canvas to MP4 with WebCodecs.
+ */
+async function exportMp4(myGeneration: number) {
+  if (!track || !geometry) {
+    throw new Error('No video is loaded.')
+  }
+
+  const { width, height, rotation } = geometry
+  const format = new Mp4OutputFormat()
+
+  const codec = await getFirstEncodableVideoCodec(format.getSupportedVideoCodecs(), {
+    width,
+    height,
+    quality: QUALITY_HIGH,
+  })
+  if (!codec) {
+    throw new Error('This browser cannot encode any video codec that MP4 supports.')
+  }
+
+  const canvas = new OffscreenCanvas(width, height)
+  const context = canvas.getContext('2d')
+  if (!context) {
+    throw new Error('Could not get a 2D context for the export canvas.')
+  }
+
+  const durationMicros = secondsToMicros(await track.computeDuration())
+  const output = new Output({ format, target: new BufferTarget() })
+  const source = new CanvasSource(canvas, { codec, quality: QUALITY_HIGH })
+  output.addVideoTrack(source)
+  await output.start()
+
+  // A sink of its own, so an interrupted playback iterator cannot interfere.
+  const samples = new VideoSampleSink(track).samples()
+  let lastReportedPercent = -1
+  let finalized = false
+
+  try {
+    for await (const sample of samples) {
+      if (myGeneration !== generation) {
+        sample.close()
+        break
+      }
+
+      const timestampMicros = Math.round(sample.microsecondTimestamp)
+      const sampleDurationMicros = Math.round(sample.microsecondDuration)
+      const frame = takeFrame(sample)
+
+      try {
+        drawFrame(context, frame, width, height, rotation)
+      } finally {
+        frame.close()
+      }
+
+      // Awaited to respect encoder and writer backpressure.
+      await source.add(
+        microsToSeconds(timestampMicros),
+        sampleDurationMicros > 0
+          ? microsToSeconds(sampleDurationMicros)
+          : undefined,
+      )
+
+      const percent = Math.floor(
+        exportProgress(timestampMicros, durationMicros) * 100,
+      )
+      if (percent !== lastReportedPercent) {
+        lastReportedPercent = percent
+        scope.postMessage({
+          type: 'exportProgress',
+          generation: myGeneration,
+          progress: percent / 100,
+        })
+      }
+    }
+
+    if (myGeneration !== generation) {
+      return
+    }
+
+    await output.finalize()
+    finalized = true
+
+    const buffer = output.target.buffer
+    if (!buffer) {
+      throw new Error('The export produced no data.')
+    }
+
+    scope.postMessage(
+      { type: 'exportProgress', generation: myGeneration, progress: 1 },
+    )
+    scope.postMessage(
+      { type: 'exported', generation: myGeneration, buffer },
+      [buffer],
+    )
+  } finally {
+    await samples.return()
+    if (!finalized) {
+      // Releases the encoder when the export was abandoned or threw.
+      await output.cancel()
+    }
+  }
+}
+
 scope.addEventListener('message', (event) => {
   const message = event.data
   generation = message.generation
@@ -173,6 +295,11 @@ scope.addEventListener('message', (event) => {
     case 'play':
       releasePump()
       void run(() => play(message.fromMicros, message.generation))
+      return
+
+    case 'export':
+      releasePump()
+      void run(() => exportMp4(message.generation))
       return
 
     case 'stop':

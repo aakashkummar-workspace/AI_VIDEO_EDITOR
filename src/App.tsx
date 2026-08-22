@@ -11,6 +11,7 @@ export default function App() {
   const [info, setInfo] = useState<LoadedInfo | null>(null)
   const [currentMicros, setCurrentMicros] = useState(0)
   const [playing, setPlaying] = useState(false)
+  const [exportPercent, setExportPercent] = useState<number | null>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -20,6 +21,8 @@ export default function App() {
       onLoaded: setInfo,
       onTime: setCurrentMicros,
       onPlayingChange: setPlaying,
+      onExportProgress: (progress) =>
+        setExportPercent(progress === null ? null : Math.round(progress * 100)),
       onError: setError,
     })
     playerRef.current = player
@@ -37,6 +40,7 @@ export default function App() {
     setError(null)
     setInfo(null)
     setCurrentMicros(0)
+    setExportPercent(null)
     playerRef.current?.load(file)
   }
 
@@ -52,7 +56,7 @@ export default function App() {
         <button
           type="button"
           onClick={() => playerRef.current?.play()}
-          disabled={info === null || playing}
+          disabled={info === null || playing || exportPercent !== null}
         >
           Play
         </button>{' '}
@@ -63,11 +67,20 @@ export default function App() {
         >
           Pause
         </button>{' '}
+        <button
+          type="button"
+          onClick={() => playerRef.current?.exportMp4()}
+          disabled={info === null || exportPercent !== null}
+        >
+          Export
+        </button>{' '}
         <span>
           {formatMicros(currentMicros)} /{' '}
           {formatMicros(info?.durationMicros ?? 0)}
         </span>
       </p>
+
+      {exportPercent !== null && <p>Exporting: {exportPercent}%</p>}
 
       {error !== null && <p style={{ color: 'red' }}>Error: {error}</p>}
 

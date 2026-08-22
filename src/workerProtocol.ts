@@ -14,6 +14,7 @@ export type MainToWorker =
   | { type: 'play'; generation: number; fromMicros: number }
   | { type: 'stop'; generation: number }
   | { type: 'consumed'; generation: number; count: number }
+  | { type: 'export'; generation: number }
 
 export type WorkerToMain =
   | {
@@ -32,4 +33,6 @@ export type WorkerToMain =
       frame: VideoFrame
     }
   | { type: 'end'; generation: number }
+  | { type: 'exportProgress'; generation: number; progress: number }
+  | { type: 'exported'; generation: number; buffer: ArrayBuffer }
   | { type: 'error'; generation: number; message: string }

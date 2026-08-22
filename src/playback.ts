@@ -49,14 +49,20 @@ export function selectFrame(
   return { drawIndex, dropCount: drawIndex < 0 ? 0 : drawIndex }
 }
 
+/** Any 2D context: a preview canvas on the UI thread, or an OffscreenCanvas in a worker. */
+export type RenderContext =
+  | CanvasRenderingContext2D
+  | OffscreenCanvasRenderingContext2D
+
 /**
- * Draws a frame to fill a canvas of `width` x `height` display pixels.
+ * THE render function. Draws a frame to fill a canvas of `width` x `height`
+ * display pixels. Both the preview and the export call this and nothing else.
  *
  * A VideoFrame from mediabunny carries no rotation metadata (display
  * dimensions are pre-rotation), so the track rotation is applied here.
  */
 export function drawFrame(
-  context: CanvasRenderingContext2D,
+  context: RenderContext,
   frame: CanvasImageSource,
   width: number,
   height: number,
@@ -95,4 +101,19 @@ export function formatMicros(micros: number): string {
   const hundredths = Math.floor((totalMillis % 1000) / 10)
 
   return `${minutes}:${String(seconds).padStart(2, '0')}.${String(hundredths).padStart(2, '0')}`
+}
+
+/** Fraction of the export that is complete, as a value from 0 to 1. */
+export function exportProgress(
+  timestampMicros: number,
+  durationMicros: number,
+): number {
+  if (durationMicros <= 0) return 0
+  return Math.min(1, Math.max(0, timestampMicros / durationMicros))
+}
+
+/** Turns a source file name into the name the exported MP4 downloads as. */
+export function exportFileName(sourceName: string): string {
+  const base = sourceName.replace(/\.[^.]*$/, '').trim()
+  return base.length > 0 ? `${base}-export.mp4` : 'export.mp4'
 }

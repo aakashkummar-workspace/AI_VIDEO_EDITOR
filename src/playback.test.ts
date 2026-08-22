@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   drawFrame,
+  exportFileName,
+  exportProgress,
   formatMicros,
   microsToSeconds,
   secondsToMicros,
@@ -147,5 +149,60 @@ describe('time units', () => {
     expect(formatMicros(3_450_000)).toBe('0:03.45')
     expect(formatMicros(65_120_000)).toBe('1:05.12')
     expect(formatMicros(-5000)).toBe('0:00.00')
+  })
+})
+
+describe('one render path', () => {
+  it('draws identically for a preview canvas and a worker OffscreenCanvas', () => {
+    // The export runs in a worker against an OffscreenCanvas context. If this
+    // ever needs a second code path, drawFrame stopped being the only renderer.
+    const preview = recordingContext()
+    const offscreen = recordingContext()
+
+    drawFrame(preview.context, frame, 1080, 1920, 90)
+    drawFrame(
+      offscreen.context as unknown as OffscreenCanvasRenderingContext2D,
+      frame,
+      1080,
+      1920,
+      90,
+    )
+
+    expect(offscreen.ops).toEqual(preview.ops)
+  })
+})
+
+describe('exportProgress', () => {
+  it('reports zero for an unknown duration', () => {
+    expect(exportProgress(500_000, 0)).toBe(0)
+  })
+
+  it('reports the fraction encoded so far', () => {
+    expect(exportProgress(3_000_000, 12_000_000)).toBe(0.25)
+  })
+
+  it('clamps to the 0..1 range', () => {
+    expect(exportProgress(13_000_000, 12_000_000)).toBe(1)
+    expect(exportProgress(-1_000, 12_000_000)).toBe(0)
+  })
+})
+
+describe('exportFileName', () => {
+  it('replaces the source extension', () => {
+    expect(exportFileName('clip.mp4')).toBe('clip-export.mp4')
+    expect(exportFileName('holiday.MOV')).toBe('holiday-export.mp4')
+  })
+
+  it('only strips the final extension', () => {
+    expect(exportFileName('scene.1.mov')).toBe('scene.1-export.mp4')
+  })
+
+  it('handles names with no extension', () => {
+    expect(exportFileName('recording')).toBe('recording-export.mp4')
+  })
+
+  it('falls back when there is no usable name', () => {
+    expect(exportFileName('')).toBe('export.mp4')
+    expect(exportFileName('.mp4')).toBe('export.mp4')
   })
 })
