@@ -7,7 +7,6 @@ import {
 } from './fixture.config.mjs'
 
 const SECOND = 1_000_000
-const SOURCE_DURATION = (FIXTURE.frames / FIXTURE.fps) * SECOND
 
 const TIMELINE = gappedTimelineSpec()
 
