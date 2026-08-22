@@ -25,6 +25,39 @@ export const FIXTURE_B = {
 }
 
 /**
+ * A third clip carrying audio: one pure tone per second, so a decoded window
+ * can be traced back to the second it came from. 100Hz apart, well clear of
+ * any confusion after lossy encoding.
+ */
+export const FIXTURE_TONES = {
+  path: 'tests/fixtures/tones-30fps.mp4',
+  frames: 180,
+  width: 320,
+  height: 240,
+  fps: 30,
+  hueOffset: 90,
+  marker: 'bar',
+  audioSampleRate: 48_000,
+  toneHz: [300, 400, 500, 600, 700, 800],
+}
+
+/**
+ * A fourth clip at a DIFFERENT audio sample rate, to prove mixed rates play
+ * and export together.
+ */
+export const FIXTURE_TONES_44K = {
+  path: 'tests/fixtures/tones-44k.mp4',
+  frames: 90,
+  width: 320,
+  height: 240,
+  fps: 30,
+  hueOffset: 270,
+  marker: 'block',
+  audioSampleRate: 44_100,
+  toneHz: [900, 1000, 1100],
+}
+
+/**
  * Timestamp to seek to in order to land on `goldenFrame`. Aiming at the middle
  * of the frame's interval keeps the seek robust against rounding in the muxed
  * timestamps.
@@ -98,3 +131,55 @@ export function gappedTimelineSpec() {
 
 /** Total length of gappedTimelineSpec, gap included. */
 export const GAPPED_TIMELINE_DURATION = 5 * SECOND
+
+const TONES_A = { id: 'src-tones', url: `/${FIXTURE_TONES.path}` }
+const TONES_B = { id: 'src-tones-44k', url: `/${FIXTURE_TONES_44K.path}` }
+
+/**
+ * Two tone clips at DIFFERENT sample rates with a gap between them:
+ *
+ *   timeline  0s ─── 2s        3s ─── 5s
+ *   clip      [ A: src 1-3s ]  [ B: src 0-2s ]
+ *                      └ gap ┘
+ *
+ * Clip A is offset in its source, so timeline second 0 must carry the tone
+ * that lives at source second 1. Clip B is 44.1kHz where A is 48kHz.
+ */
+export function tonesTimelineSpec() {
+  return {
+    composition: { width: FIXTURE_TONES.width, height: FIXTURE_TONES.height },
+    sources: [TONES_A, TONES_B],
+    clips: [
+      {
+        sourceId: TONES_A.id,
+        sourceInMicros: 1 * SECOND,
+        sourceOutMicros: 3 * SECOND,
+        timelineStartMicros: 0,
+      },
+      {
+        sourceId: TONES_B.id,
+        sourceInMicros: 0,
+        sourceOutMicros: 2 * SECOND,
+        timelineStartMicros: 3 * SECOND,
+      },
+    ],
+  }
+}
+
+/**
+ * What each second of tonesTimelineSpec should sound like, by timeline second.
+ * Null means silence.
+ *
+ *   0s  clip A, source second 1  ->  400Hz
+ *   1s  clip A, source second 2  ->  500Hz
+ *   2s  gap                      ->  silence
+ *   3s  clip B, source second 0  ->  900Hz
+ *   4s  clip B, source second 1  ->  1000Hz
+ */
+export const TONES_EXPECTED_BY_SECOND = [400, 500, null, 900, 1000]
+
+/** Every tone either fixture can produce, for the frequency search. */
+export const ALL_TONE_HZ = [
+  ...FIXTURE_TONES.toneHz,
+  ...FIXTURE_TONES_44K.toneHz,
+]

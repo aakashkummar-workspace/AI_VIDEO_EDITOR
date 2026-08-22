@@ -37,6 +37,21 @@ declare global {
           times: number[]
         }
       >
+      setProject(project: unknown): void
+      audioWindows(options: {
+        url?: string
+        windowMicros: number
+        candidatesHz: number[]
+        silenceRms?: number
+      }): Promise<{
+        sampleRate: number
+        windows: {
+          startMicros: number
+          rms: number
+          silent: boolean
+          dominantHz: number | null
+        }[]
+      }>
       frameCounts(): Promise<{
         worker: { created: number; closed: number }
         main: { created: number; closed: number }

@@ -11,7 +11,8 @@
     "test": "vitest run && playwright test",
     "fixture": "node scripts/generate-fixture.mjs",
     "test:unit": "vitest run",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "drift": "node scripts/measure-drift.mjs"
   },
   "dependencies": {
     "immer": "^11.1.18",

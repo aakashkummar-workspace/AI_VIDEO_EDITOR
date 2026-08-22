@@ -32,11 +32,24 @@ export const BUFFER_AHEAD_MICROS = 400_000
  */
 export const BUFFER_MAX_FRAMES = 24
 
+/** Decoded PCM for one stretch of the timeline. Planes are per channel. */
+export type AudioChunk = {
+  timelineMicros: number
+  sampleRate: number
+  /** Explicitly ArrayBuffer-backed, so copyToChannel accepts them. */
+  planes: Float32Array<ArrayBuffer>[]
+}
+
+/** How many undelivered audio chunks the worker keeps ahead of the playhead. */
+export const AUDIO_BUFFER_MAX_CHUNKS = 64
+
 export type SourceGeometry = {
   durationMicros: number
   width: number
   height: number
   rotation: Rotation
+  /** Null when the source carries no audio track. */
+  audio: { sampleRate: number; channels: number } | null
 }
 
 export type MainToWorker =
@@ -47,7 +60,18 @@ export type MainToWorker =
   | { type: 'play'; generation: number; fromTimelineMicros: number }
   | { type: 'stop'; generation: number }
   | { type: 'consumed'; generation: number; count: number }
-  | { type: 'export'; generation: number }
+  | { type: 'audioConsumed'; generation: number; count: number }
+  /** Decodes the whole timeline's audio, for the offline export mix. */
+  | { type: 'decodeAudioForExport'; generation: number }
+  | {
+      type: 'export'
+      generation: number
+      /** The rendered mix to mux in, or null for a silent timeline. */
+      audio: {
+        sampleRate: number
+        planes: Float32Array<ArrayBuffer>[]
+      } | null
+    }
   | { type: 'frameCounts'; generation: number }
 
 export type WorkerToMain =
@@ -68,6 +92,13 @@ export type WorkerToMain =
       timelineMicros: number
       frame: VideoFrame | null
     }
+  | {
+      type: 'audioChunk'
+      generation: number
+      mode: 'play' | 'export'
+      chunk: AudioChunk
+    }
+  | { type: 'audioEnd'; generation: number; mode: 'play' | 'export' }
   | { type: 'end'; generation: number }
   | { type: 'exportProgress'; generation: number; progress: number }
   | { type: 'exported'; generation: number; buffer: ArrayBuffer }

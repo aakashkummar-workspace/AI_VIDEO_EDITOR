@@ -3,11 +3,17 @@
  * and the real worker; it does not reimplement any of the rendering.
  */
 import {
+  ALL_FORMATS,
+  AudioBufferSink,
+  AudioBufferSource,
+  BlobSource,
   BufferTarget,
   CanvasSource,
+  Input,
   Mp4OutputFormat,
   Output,
   QUALITY_HIGH,
+  getFirstEncodableAudioCodec,
   getFirstEncodableVideoCodec,
 } from 'mediabunny'
 import { createPlayer } from '../../src/player'
@@ -91,6 +97,13 @@ async function generateFixture(options: {
   hueOffset?: number
   /** Draws the moving marker as a bar or a block, likewise. */
   marker?: 'bar' | 'block'
+  /**
+   * One sine frequency per whole second of the clip. A decoded window can then
+   * be traced back to the second it came from, which is what makes audio sync
+   * measurable rather than a matter of listening.
+   */
+  toneHz?: number[]
+  audioSampleRate?: number
 }) {
   const { frames, width, height, fps } = options
   const hueOffset = options.hueOffset ?? 0
@@ -110,7 +123,45 @@ async function generateFixture(options: {
   const output = new Output({ format, target: new BufferTarget() })
   const source = new CanvasSource(surface, { codec, quality: QUALITY_HIGH })
   output.addVideoTrack(source)
+
+  const toneHz = options.toneHz
+  const audioSampleRate = options.audioSampleRate ?? 48_000
+  let audioSource: AudioBufferSource | null = null
+
+  if (toneHz && toneHz.length > 0) {
+    const audioCodec = await getFirstEncodableAudioCodec(
+      format.getSupportedAudioCodecs(),
+      { numberOfChannels: 1, sampleRate: audioSampleRate },
+    )
+    if (!audioCodec) throw new Error('No encodable audio codec for the fixture.')
+
+    audioSource = new AudioBufferSource({
+      codec: audioCodec,
+      quality: QUALITY_HIGH,
+    })
+    output.addAudioTrack(audioSource)
+  }
+
   await output.start()
+
+  if (audioSource && toneHz) {
+    // One buffer per second, each a pure tone, so the timeline second a decoded
+    // window belongs to can be read straight off its frequency.
+    const context = new OfflineAudioContext(1, audioSampleRate, audioSampleRate)
+    const seconds = Math.ceil(frames / fps)
+
+    for (let second = 0; second < seconds; second++) {
+      const hz = toneHz[second % toneHz.length]!
+      const buffer = context.createBuffer(1, audioSampleRate, audioSampleRate)
+      const channel = buffer.getChannelData(0)
+
+      for (let i = 0; i < channel.length; i++) {
+        channel[i] = 0.5 * Math.sin((2 * Math.PI * hz * i) / audioSampleRate)
+      }
+
+      await audioSource.add(buffer)
+    }
+  }
 
   for (let index = 0; index < frames; index++) {
     // Flat blocks keep the clip small and compress near-losslessly.
@@ -137,6 +188,7 @@ async function generateFixture(options: {
     await source.add(index / fps, 1 / fps)
   }
 
+  audioSource?.close()
   await output.finalize()
   const buffer = output.target.buffer
   if (!buffer) throw new Error('The fixture produced no data.')
@@ -241,6 +293,117 @@ async function loadExported() {
   }
 }
 
+/**
+ * Strength of one frequency in a block of samples, by the Goertzel algorithm.
+ * Cheaper than an FFT and all that is needed here: the fixture tones are pure
+ * and the candidates are known in advance.
+ */
+function goertzel(
+  samples: Float32Array,
+  sampleRate: number,
+  frequency: number,
+): number {
+  const k = (2 * Math.PI * frequency) / sampleRate
+  const coefficient = 2 * Math.cos(k)
+
+  let s1 = 0
+  let s2 = 0
+  for (let i = 0; i < samples.length; i++) {
+    const s0 = samples[i]! + coefficient * s1 - s2
+    s2 = s1
+    s1 = s0
+  }
+
+  return Math.sqrt(s1 * s1 + s2 * s2 - coefficient * s1 * s2) / samples.length
+}
+
+/** Decodes an MP4's audio into one mono track of samples. */
+async function decodeAudio(file: File) {
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+  const track = await input.getPrimaryAudioTrack()
+  if (!track) return null
+
+  const sampleRate = await track.getSampleRate()
+  const sink = new AudioBufferSink(track)
+  const chunks: { startSample: number; data: Float32Array }[] = []
+  let total = 0
+
+  for await (const wrapped of sink.buffers()) {
+    const startSample = Math.round(wrapped.timestamp * sampleRate)
+    const data = wrapped.buffer.getChannelData(0).slice()
+    chunks.push({ startSample, data })
+    total = Math.max(total, startSample + data.length)
+  }
+
+  const samples = new Float32Array(total)
+  for (const chunk of chunks) samples.set(chunk.data, chunk.startSample)
+
+  input.dispose()
+  return { samples, sampleRate }
+}
+
+/**
+ * Chops decoded audio into windows and reports, for each, the loudest of the
+ * candidate tones and how loud the window is overall. A window of silence
+ * reports a null tone.
+ */
+async function audioWindows(options: {
+  /** Omit to analyse whatever the last export produced. */
+  url?: string
+  windowMicros: number
+  candidatesHz: number[]
+  silenceRms?: number
+}) {
+  const file = options.url
+    ? await fetchAsFile(options.url, 'analysed.mp4')
+    : exported
+      ? new File([exported], 'exported.mp4', { type: 'video/mp4' })
+      : null
+  if (!file) throw new Error('Nothing to analyse.')
+
+  const decoded = await decodeAudio(file)
+  if (!decoded) return { sampleRate: 0, windows: [] }
+
+  const { samples, sampleRate } = decoded
+  const silenceRms = options.silenceRms ?? 0.02
+  const windowSamples = Math.round((options.windowMicros / 1e6) * sampleRate)
+  const windows: {
+    startMicros: number
+    rms: number
+    silent: boolean
+    dominantHz: number | null
+  }[] = []
+
+  for (let start = 0; start + windowSamples <= samples.length; start += windowSamples) {
+    const block = samples.subarray(start, start + windowSamples)
+
+    let sumSquares = 0
+    for (let i = 0; i < block.length; i++) sumSquares += block[i]! * block[i]!
+    const rms = Math.sqrt(sumSquares / block.length)
+
+    let dominantHz: number | null = null
+    let best = 0
+    if (rms >= silenceRms) {
+      for (const candidate of options.candidatesHz) {
+        const magnitude = goertzel(block, sampleRate, candidate)
+        if (magnitude > best) {
+          best = magnitude
+          dominantHz = candidate
+        }
+      }
+    }
+
+    windows.push({
+      startMicros: Math.round((start / sampleRate) * 1e6),
+      rms: Number(rms.toFixed(4)),
+      silent: rms < silenceRms,
+      dominantHz,
+    })
+  }
+
+  return { sampleRate, windows }
+}
+
 /** Renders one timeline position through the preview path, returns pixels. */
 async function pixelsAt(timelineMicros: number) {
   const ready = nextTime()
@@ -260,7 +423,7 @@ async function exportMp4() {
   const ready = new Promise<void>((resolve) => {
     notifyExported = resolve
   })
-  player.exportMp4()
+  void player.exportMp4()
   await ready
   throwIfErrored()
 
@@ -286,12 +449,15 @@ async function playThrough() {
 Object.assign(window, {
   harness: {
     generateFixture,
+    audioWindows,
     loadProject,
     loadExported,
     pixelsAt,
     exportMp4,
     playThrough,
     frameCounts: () => player.frameCounts(),
+    setProject: (project: Parameters<typeof player.setProject>[0]) =>
+      player.setProject(project),
     duration: () => timelineDuration(useTimelineStore.getState().project),
     microsToSeconds,
   },

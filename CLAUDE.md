@@ -32,6 +32,23 @@
 - The test clip is committed at `tests/fixtures/`. Regenerate it with
   `npm run fixture`, which encodes it with WebCodecs in a real browser.
   Never use ffmpeg or ffmpeg.wasm, in tests or anywhere else.
+- The AUDIO CLOCK is authoritative. `AudioContext.currentTime` drives
+  playback and video follows it, even when the timeline is silent - a
+  silent project schedules nothing but still reads its position from
+  the audio clock. There is deliberately no second clock path: a
+  fallback used only by silent projects would take all the testing
+  while the audio path took all the risk. Never reintroduce
+  `performance.now()` as a position source.
+- Audio sync is tested by frequency, not by ear. The tone fixtures
+  carry one pure tone per second, so a decoded window can be traced
+  back to the timeline second it came from
+  (`tests/audio-sync.spec.ts`). Live drift is NOT in the suite - it
+  depends on wall-clock scheduling and would flake; run
+  `npm run drift` by hand instead.
+- The Playwright browser runs with `--autoplay-policy=
+  no-user-gesture-required`, because an AudioContext stays suspended
+  until a user gesture and the tests drive playback directly. That
+  flag is for the test browser only; the app relies on the Play click.
 - Seek cost was measured on synthetic H.264 only (worst case 95ms, a
   1280x720 clip with a single keyframe). Re-run
   `node scripts/measure-seek.mjs` before trusting the decode buffer
