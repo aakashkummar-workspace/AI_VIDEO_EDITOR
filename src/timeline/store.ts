@@ -120,3 +120,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     reset: () => set({ project: emptyProject(), past: [], future: [] }),
   }
 })
+
+// Test seam. The browser tests assert on real project state rather than on
+// pixels or DOM attributes, so they need a handle on the store. Dev only:
+// this is stripped from a production build.
+if (import.meta.env.DEV) {
+  ;(globalThis as unknown as Record<string, unknown>).__timelineStore =
+    useTimelineStore
+}

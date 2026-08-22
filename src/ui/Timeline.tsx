@@ -7,6 +7,7 @@ import {
   rulerTicks,
   trackWidth,
 } from '../timeline/layout'
+import { clipZoneAt, type DragMode } from '../timeline/dragging'
 import { timelineDuration } from '../timeline/operations'
 import { clipDuration, type Project } from '../timeline/types'
 
@@ -15,14 +16,22 @@ export type TimelineProps = {
   /** Playhead position, in timeline microseconds. */
   currentMicros: number
   onSeek: (timelineMicros: number) => void
+  onClipGrab: (clipId: string, mode: DragMode, clientX: number) => void
   pixelsPerSecond?: number
 }
 
-/** Read-only view of the video track: a ruler, clip blocks, and a playhead. */
+const CURSOR_FOR: Record<DragMode, string> = {
+  'trim-start': 'ew-resize',
+  'trim-end': 'ew-resize',
+  move: 'move',
+}
+
+/** The video track: a ruler, clip blocks, and a playhead. */
 export default function Timeline({
   project,
   currentMicros,
   onSeek,
+  onClipGrab,
   pixelsPerSecond = PIXELS_PER_SECOND,
 }: TimelineProps) {
   const duration = timelineDuration(project)
@@ -33,6 +42,11 @@ export default function Timeline({
     const bounds = event.currentTarget.getBoundingClientRect()
     const micros = pixelsToMicros(event.clientX - bounds.left, pixelsPerSecond)
     onSeek(clampToTimeline(micros, duration))
+  }
+
+  function zoneFor(event: MouseEvent<HTMLDivElement>): DragMode {
+    const bounds = event.currentTarget.getBoundingClientRect()
+    return clipZoneAt(event.clientX - bounds.left, bounds.width)
   }
 
   return (
@@ -65,6 +79,16 @@ export default function Timeline({
               style={{
                 left: microsToPixels(clip.timelineStartMicros, pixelsPerSecond),
                 width: microsToPixels(clipDuration(clip), pixelsPerSecond),
+              }}
+              // Set directly rather than through state: the cursor has to
+              // track the pointer, and re-rendering the timeline on every
+              // mousemove to change one style is not worth it.
+              onMouseMove={(event) => {
+                event.currentTarget.style.cursor = CURSOR_FOR[zoneFor(event)]
+              }}
+              onMouseDown={(event) => {
+                event.preventDefault()
+                onClipGrab(clip.id, zoneFor(event), event.clientX)
               }}
             >
               <span className="timeline-clip-label">

@@ -2,6 +2,8 @@ import type { createPlayer } from '../src/player'
 
 declare global {
   interface Window {
+    /** Dev-only test seam exposed by src/timeline/store.ts. */
+    __timelineStore: typeof import('../src/timeline/store').useTimelineStore
     harness: {
       generateFixture(options: {
         frames: number
