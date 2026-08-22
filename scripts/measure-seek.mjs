@@ -10,7 +10,14 @@ page.on('pageerror', (error) => console.log(`[pageerror] ${error.message}`))
 await page.goto('http://localhost:5173/tests/harness/measure.html')
 await page.waitForFunction(() => 'measure' in window)
 
-const results = await page.evaluate(() => window.measure.run())
+// Given file URLs, measure those instead of the synthetic clips: the whole
+// point of this script is that synthetic H.264 is not representative.
+// Accept paths with or without a leading slash: a shell that rewrites POSIX
+// paths (Git Bash on Windows) mangles the leading-slash form beyond use.
+const urls = process.argv.slice(2).map((path) => `/${path.replace(/^\/+/, '')}`)
+const results = urls.length
+  ? await page.evaluate((paths) => window.measure.runOn(paths), urls)
+  : await page.evaluate(() => window.measure.run())
 
 for (const result of results) {
   console.log(`\n=== ${result.label} (${(result.bytes / 1024).toFixed(0)} KB) ===`)

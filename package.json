@@ -12,7 +12,8 @@
     "fixture": "node scripts/generate-fixture.mjs",
     "test:unit": "vitest run",
     "test:browser": "playwright test",
-    "drift": "node scripts/measure-drift.mjs"
+    "drift": "node scripts/measure-drift.mjs",
+    "export:measure": "node scripts/measure-export.mjs"
   },
   "dependencies": {
     "immer": "^11.1.18",

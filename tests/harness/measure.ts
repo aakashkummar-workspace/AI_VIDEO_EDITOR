@@ -245,4 +245,27 @@ async function run() {
   return results
 }
 
-Object.assign(window, { measure: { run } })
+/** Measures real files served by the dev server, rather than generated ones. */
+async function runOn(urls: string[]) {
+  const results = []
+
+  for (const url of urls) {
+    const blob = await (await fetch(url)).blob()
+    const { track } = await openTrack(blob)
+    const durationSeconds = await track.computeDuration()
+    const width = await track.getDisplayWidth()
+    const height = await track.getDisplayHeight()
+
+    results.push(
+      await measureClip(
+        `${url} (${width}x${height}, ${durationSeconds.toFixed(1)}s)`,
+        blob,
+        durationSeconds,
+      ),
+    )
+  }
+
+  return results
+}
+
+Object.assign(window, { measure: { run, runOn } })

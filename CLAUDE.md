@@ -49,10 +49,19 @@
   no-user-gesture-required`, because an AudioContext stays suspended
   until a user gesture and the tests drive playback directly. That
   flag is for the test browser only; the app relies on the Play click.
-- Seek cost was measured on synthetic H.264 only (worst case 95ms, a
-  1280x720 clip with a single keyframe). Re-run
-  `node scripts/measure-seek.mjs` before trusting the decode buffer
-  margin on real camera footage, 60fps, or 4K.
+- Seek cost has been measured on real footage as well as synthetic:
+  832x464 phone video with 1s GOPs seeks in 12ms median, 26ms worst,
+  and our own exported files (2s GOPs) in 29ms median, 54ms worst -
+  all far inside the 400ms decode buffer. The synthetic worst case
+  remains 95ms (a 1280x720 clip with a single keyframe). Re-measure
+  with `npm run fixture`-independent files via
+  `node scripts/measure-seek.mjs <path under the project>` before
+  trusting the margin at 60fps or 4K.
+- Never schedule one Web Audio node per decoded packet. Rendering a
+  2 minute timeline that way took OfflineAudioContext 80 seconds;
+  joining contiguous packets into runs first takes 42ms. Measure a
+  real export with `npm run export:measure <path>` after touching the
+  mix.
 
 # Stack
 Vite + React + TypeScript, pixi.js, mediabunny, zustand + immer

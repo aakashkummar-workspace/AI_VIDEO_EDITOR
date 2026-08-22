@@ -51,6 +51,59 @@ type Stats = {
 
 const STATS_LOG_INTERVAL_MS = 1000
 
+/** A stretch of decoded audio that is contiguous and uniform. */
+type AudioRun = {
+  startMicros: number
+  sampleRate: number
+  channels: number
+  frames: number
+  chunks: AudioChunk[]
+}
+
+/** Chunks whose start is this far from the previous end still count as joined. */
+const RUN_JOIN_TOLERANCE_MICROS = 1000
+
+/**
+ * Groups decoded chunks into the longest runs that play back identically: same
+ * rate, same channel count, each starting where the last one ended. A clip that
+ * was never cut collapses to a single run.
+ */
+export function joinIntoRuns(chunks: AudioChunk[]): AudioRun[] {
+  const runs: AudioRun[] = []
+
+  for (const chunk of chunks) {
+    const frames = chunk.planes[0]?.length ?? 0
+    if (frames === 0) continue
+
+    const current = runs.at(-1)
+    const endsAt = current
+      ? current.startMicros + (current.frames / current.sampleRate) * 1e6
+      : 0
+
+    const joins =
+      current !== undefined &&
+      current.sampleRate === chunk.sampleRate &&
+      current.channels === chunk.planes.length &&
+      Math.abs(chunk.timelineMicros - endsAt) <= RUN_JOIN_TOLERANCE_MICROS
+
+    if (joins && current) {
+      current.chunks.push(chunk)
+      current.frames += frames
+      continue
+    }
+
+    runs.push({
+      startMicros: chunk.timelineMicros,
+      sampleRate: chunk.sampleRate,
+      channels: chunk.planes.length,
+      frames,
+      chunks: [chunk],
+    })
+  }
+
+  return runs
+}
+
 /**
  * Owns the decode worker and the requestAnimationFrame playback loop.
  *
@@ -298,10 +351,12 @@ export function createPlayer(
     const durationMicros = timelineDuration(project)
     if (durationMicros <= 0) return null
 
+    const decodeStarted = performance.now()
     const chunks = await new Promise<AudioChunk[]>((resolve) => {
       exportAudio = { chunks: [], resolve }
       send({ type: 'decodeAudioForExport', generation })
     })
+    const decodedMs = performance.now() - decodeStarted
     if (chunks.length === 0) return null
 
     const sampleRate = chunks[0]!.sampleRate
@@ -310,26 +365,43 @@ export function createPlayer(
 
     const offline = new OfflineAudioContext(channels, frames, sampleRate)
 
-    for (const chunk of chunks) {
-      const chunkFrames = chunk.planes[0]?.length ?? 0
-      if (chunkFrames === 0) continue
+    // One node per decoded packet renders unusably slowly - a 2 minute
+    // timeline is ~5900 packets, and OfflineAudioContext took 80 seconds to
+    // render that many. Contiguous packets of the same shape are joined into
+    // runs first, so an uncut clip becomes a single node.
+    const runs = joinIntoRuns(chunks)
 
+    for (const run of runs) {
       const buffer = offline.createBuffer(
-        chunk.planes.length,
-        chunkFrames,
-        chunk.sampleRate,
+        run.channels,
+        run.frames,
+        run.sampleRate,
       )
-      for (let channel = 0; channel < chunk.planes.length; channel++) {
-        buffer.copyToChannel(chunk.planes[channel]!, channel)
+
+      for (let channel = 0; channel < run.channels; channel++) {
+        const target = buffer.getChannelData(channel)
+        let offset = 0
+        for (const chunk of run.chunks) {
+          const plane = chunk.planes[channel] ?? chunk.planes[0]!
+          target.set(plane, offset)
+          offset += plane.length
+        }
       }
 
       const node = offline.createBufferSource()
       node.buffer = buffer
       node.connect(offline.destination)
-      node.start(chunk.timelineMicros / 1e6)
+      node.start(run.startMicros / 1e6)
     }
 
+    const renderStarted = performance.now()
     const rendered = await offline.startRendering()
+    console.log(
+      `[export] audio: ${chunks.length} chunks joined into ${runs.length}` +
+        ` runs, decoded in ${decodedMs.toFixed(0)}ms, scheduled in` +
+        ` ${(renderStarted - decodeStarted - decodedMs).toFixed(0)}ms,` +
+        ` rendered in ${(performance.now() - renderStarted).toFixed(0)}ms`,
+    )
     const planes: Float32Array<ArrayBuffer>[] = []
     for (let channel = 0; channel < rendered.numberOfChannels; channel++) {
       planes.push(
