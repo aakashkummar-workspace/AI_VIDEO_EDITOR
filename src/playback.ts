@@ -55,6 +55,39 @@ export type RenderContext =
   | CanvasRenderingContext2D
   | OffscreenCanvasRenderingContext2D
 
+/** Where a source of these dimensions sits inside the composition. */
+export type FitRect = { x: number; y: number; width: number; height: number }
+
+/**
+ * Fits a source into the composition without distorting it: scaled to the
+ * larger of the two constraints and centred, so the leftover is even margin on
+ * one axis. Never stretches, never crops.
+ */
+export function fitRect(
+  sourceWidth: number,
+  sourceHeight: number,
+  compositionWidth: number,
+  compositionHeight: number,
+): FitRect {
+  if (sourceWidth <= 0 || sourceHeight <= 0) {
+    return { x: 0, y: 0, width: 0, height: 0 }
+  }
+
+  const scale = Math.min(
+    compositionWidth / sourceWidth,
+    compositionHeight / sourceHeight,
+  )
+  const width = Math.round(sourceWidth * scale)
+  const height = Math.round(sourceHeight * scale)
+
+  return {
+    x: Math.round((compositionWidth - width) / 2),
+    y: Math.round((compositionHeight - height) / 2),
+    width,
+    height,
+  }
+}
+
 /**
  * THE render function. Given the project and a position on the timeline, paints
  * exactly what should be on screen at that moment.
@@ -62,9 +95,9 @@ export type RenderContext =
  * Both the preview and the export call this and nothing else. If they ever
  * diverge here, the golden-frame test fails, and that is the point.
  *
- * `frame` is whatever was decoded for this position, or null. Nothing is on the
- * timeline at this position, or nothing decoded for it, means black - never a
- * stale frame left over from the last paint.
+ * The composition is always cleared to black first, so a gap, a frame that
+ * failed to decode, and the letterbox bars beside a source of a different
+ * shape are all the same thing: black, never a stale frame from the last paint.
  */
 export function renderFrame(
   context: RenderContext,
@@ -73,22 +106,28 @@ export function renderFrame(
   frame: CanvasImageSource | null,
 ): void {
   const { width, height } = project.composition
+
+  context.save()
+  context.fillStyle = '#000000'
+  context.fillRect(0, 0, width, height)
+  context.restore()
+
   const found = clipAt(project, timelineMicros)
+  if (!found || !frame) return
 
-  if (!found || !frame) {
-    context.save()
-    context.fillStyle = '#000000'
-    context.fillRect(0, 0, width, height)
-    context.restore()
-    return
-  }
+  const source = project.sources[found.clip.sourceId]
+  if (!source) return
 
-  const rotation = project.sources[found.clip.sourceId]?.rotation ?? 0
-  drawFrame(context, frame, width, height, rotation)
+  drawFrame(
+    context,
+    frame,
+    fitRect(source.width, source.height, width, height),
+    source.rotation,
+  )
 }
 
 /**
- * Draws one frame to fill the composition, applying the source's rotation.
+ * Draws one frame into `rect`, applying the source's rotation.
  *
  * A VideoFrame from mediabunny carries no rotation metadata (its display
  * dimensions are pre-rotation), so the rotation is applied here. Private to
@@ -97,11 +136,14 @@ export function renderFrame(
 export function drawFrame(
   context: RenderContext,
   frame: CanvasImageSource,
-  width: number,
-  height: number,
+  rect: FitRect,
   rotation: Rotation,
 ): void {
+  const { x, y, width, height } = rect
+  if (width <= 0 || height <= 0) return
+
   context.save()
+  context.translate(x, y)
 
   switch (rotation) {
     case 90:

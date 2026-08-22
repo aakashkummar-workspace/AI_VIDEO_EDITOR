@@ -5,6 +5,31 @@ import { FIXTURE } from './fixture.config.mjs'
 const PIXELS_PER_SECOND = 100
 const FIXTURE_SECONDS = FIXTURE.frames / FIXTURE.fps
 
+/** What is actually painted on the preview canvas. */
+async function canvasStats(page: import('@playwright/test').Page) {
+  return page.evaluate(() => {
+    const canvas = document.querySelector('canvas')!
+    const context = canvas.getContext('2d')!
+    const { data } = context.getImageData(0, 0, canvas.width, canvas.height)
+
+    let min = 255
+    let max = 0
+    let transparent = 0
+    // Aggregates alone cannot tell two frames apart - both have black text on
+    // a bright bar, so both hit 0 and 255. Carry a content signature too.
+    let signature = 0
+    for (let i = 0; i < data.length; i += 4) {
+      const value = (data[i]! + data[i + 1]! + data[i + 2]!) / 3
+      if (value < min) min = value
+      if (value > max) max = value
+      if (data[i + 3] === 0) transparent++
+      signature = (signature * 31 + value) % 2_147_483_647
+    }
+
+    return { min, max, transparent, signature, pixels: data.length / 4 }
+  })
+}
+
 test.beforeEach(async ({ page }) => {
   page.on('pageerror', (error) => {
     throw error
@@ -101,4 +126,38 @@ test('the playhead lands at the end when playback finishes', async ({
     FIXTURE_SECONDS * PIXELS_PER_SECOND,
     0,
   )
+})
+
+test('the first frame appears as soon as a file is loaded', async ({ page }) => {
+  // Nothing has been clicked and nothing is playing: loading a file must be
+  // enough to put a frame on the canvas.
+  const stats = await canvasStats(page)
+
+  expect(stats.transparent, 'the canvas should not be blank').toBe(0)
+  expect(stats.max - stats.min, 'the frame should have content').toBeGreaterThan(
+    20,
+  )
+})
+
+test('the canvas follows an edit without being clicked', async ({ page }) => {
+  const before = await canvasStats(page)
+
+  // Trim the head in by two seconds; the frame under the playhead changes.
+  const box = (await page.getByTestId('clip').first().boundingBox())!
+  const grabX = box.x + 2
+  const y = box.y + box.height / 2
+  await page.mouse.move(grabX, y)
+  await page.mouse.down()
+  for (let step = 1; step <= 8; step++) {
+    await page.mouse.move(grabX + (200 * step) / 8, y)
+  }
+  await page.mouse.up()
+
+  // The new frame arrives from the worker, so give it a moment to land.
+  await expect.poll(async () => (await canvasStats(page)).max).toBeGreaterThan(0)
+
+  const after = await canvasStats(page)
+  expect(after.transparent).toBe(0)
+  expect(after.max - after.min).toBeGreaterThan(20)
+  expect(after.signature).not.toBe(before.signature)
 })

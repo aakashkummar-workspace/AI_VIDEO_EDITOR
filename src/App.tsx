@@ -11,7 +11,7 @@ import {
 } from './timeline/dragging'
 import { pixelsToMicros } from './timeline/layout'
 import { timelineDuration } from './timeline/operations'
-import { clearSourceFiles, registerSourceFile } from './timeline/sourceRegistry'
+import { registerSourceFile } from './timeline/sourceRegistry'
 import { useTimelineStore } from './timeline/store'
 import type { Project } from './timeline/types'
 import Timeline from './ui/Timeline'
@@ -27,7 +27,7 @@ type ActiveDrag = {
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const playerRef = useRef<ReturnType<typeof createPlayer> | null>(null)
-  const sourceNameRef = useRef('video')
+  const exportNameRef = useRef('timeline')
 
   const project = useTimelineStore((state) => state.project)
 
@@ -69,7 +69,7 @@ export default function App() {
         )
         const link = document.createElement('a')
         link.href = url
-        link.download = exportFileName(sourceNameRef.current)
+        link.download = exportFileName(exportNameRef.current)
         link.click()
 
         // Revoking immediately can cancel the download in some browsers.
@@ -85,9 +85,36 @@ export default function App() {
     }
   }, [])
 
-  // The worker renders whatever the project says, so any edit republishes it.
+  // Latest values for the effect and the window handlers below, which are
+  // bound once and so cannot close over current state.
+  const playingRef = useRef(playing)
+  const currentMicrosRef = useRef(currentMicros)
   useEffect(() => {
-    playerRef.current?.setProject(displayProject)
+    playingRef.current = playing
+    currentMicrosRef.current = currentMicros
+  }, [playing, currentMicros])
+
+  /** Where a gesture in progress wants the preview parked. */
+  const previewTargetRef = useRef<number | null>(null)
+
+  /**
+   * The worker renders whatever the project says, so any change republishes
+   * it - and then re-renders the current position, because the same moment on
+   * the timeline can show something different after a load, an edit or an undo.
+   * Without the seek nothing appears until the user happens to click.
+   */
+  useEffect(() => {
+    const player = playerRef.current
+    if (!player) return
+
+    player.setProject(displayProject)
+    if (playingRef.current) return
+
+    const timelineEnd = timelineDuration(displayProject)
+    if (timelineEnd === 0) return
+
+    const target = previewTargetRef.current ?? currentMicrosRef.current
+    player.seek(Math.min(Math.max(0, target), timelineEnd - 1))
   }, [displayProject])
 
   const seek = useCallback((timelineMicros: number) => {
@@ -130,16 +157,15 @@ export default function App() {
         deltaMicros,
       }
       const preview = applyDrag(projectRef.current, gesture)
+      previewTargetRef.current = dragPreviewMicros(preview, gesture)
       setPreviewProject(preview)
-
-      const previewMicros = dragPreviewMicros(preview, gesture)
-      if (previewMicros !== null) seek(previewMicros)
     }
 
     function onMouseUp(event: globalThis.MouseEvent) {
       const drag = dragRef.current
       if (!drag) return
       dragRef.current = null
+      previewTargetRef.current = null
       setPreviewProject(null)
 
       if (!drag.moved) return
@@ -179,7 +205,7 @@ export default function App() {
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
     }
-  }, [seek])
+  }, [])
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -216,19 +242,33 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [currentMicros])
 
+  /** Appends a clip covering the whole of a source, after everything else. */
+  function appendClip(sourceId: string) {
+    const store = useTimelineStore.getState()
+    const source = store.project.sources[sourceId]
+    if (!source) return
+
+    store.addClip({
+      id: crypto.randomUUID(),
+      sourceId,
+      sourceInMicros: 0,
+      sourceOutMicros: source.durationMicros,
+      timelineStartMicros: timelineDuration(store.project),
+    })
+  }
+
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
+    // Cleared so that picking the same file twice still fires a change.
+    event.target.value = ''
     if (!file) return
 
     setError(null)
-    setCurrentMicros(0)
     setExportPercent(null)
-    sourceNameRef.current = file.name
 
-    // One source at a time until the timeline can hold more.
     const store = useTimelineStore.getState()
-    store.reset()
-    clearSourceFiles()
+    const isFirstSource = Object.keys(store.project.sources).length === 0
+    if (isFirstSource) exportNameRef.current = file.name
 
     const sourceId = crypto.randomUUID()
     registerSourceFile(sourceId, file)
@@ -236,8 +276,12 @@ export default function App() {
     try {
       const geometry = await playerRef.current!.probeSource(sourceId, file)
 
-      // The composition defaults to the first source, then it is the user's.
-      store.setComposition({ width: geometry.width, height: geometry.height })
+      // The composition defaults to the FIRST source and is then the user's;
+      // later files letterbox into it rather than redefining it.
+      if (isFirstSource) {
+        store.setComposition({ width: geometry.width, height: geometry.height })
+      }
+
       store.addSource({
         id: sourceId,
         name: file.name,
@@ -246,13 +290,7 @@ export default function App() {
         height: geometry.height,
         rotation: geometry.rotation,
       })
-      store.addClip({
-        id: crypto.randomUUID(),
-        sourceId,
-        sourceInMicros: 0,
-        sourceOutMicros: geometry.durationMicros,
-        timelineStartMicros: 0,
-      })
+      appendClip(sourceId)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -260,6 +298,7 @@ export default function App() {
 
   const duration = timelineDuration(displayProject)
   const hasTimeline = duration > 0
+  const sources = Object.values(displayProject.sources)
 
   return (
     <div>
@@ -300,9 +339,30 @@ export default function App() {
 
       {error !== null && <p style={{ color: 'red' }}>Error: {error}</p>}
 
+      {sources.length > 0 && (
+        <ul className="media-list" data-testid="media-list">
+          {sources.map((source) => (
+            <li key={source.id} data-testid="media-item">
+              <span data-testid="media-name">{source.name}</span>{' '}
+              <span className="media-meta">
+                {source.width} x {source.height}
+              </span>{' '}
+              <button
+                type="button"
+                data-testid="add-to-timeline"
+                data-source-id={source.id}
+                onClick={() => appendClip(source.id)}
+              >
+                Add to timeline
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
       {hasTimeline && (
         <p>
-          {displayProject.composition.width} x{' '}
+          Composition {displayProject.composition.width} x{' '}
           {displayProject.composition.height} &mdash; drag to move, drag an edge
           to trim, S to split at the playhead
         </p>

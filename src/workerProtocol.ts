@@ -75,5 +75,7 @@ export type WorkerToMain =
       type: 'frameCounts'
       generation: number
       counts: { created: number; closed: number }
+      /** How many Inputs the worker currently holds open. */
+      openSources: number
     }
   | { type: 'error'; generation: number; message: string }

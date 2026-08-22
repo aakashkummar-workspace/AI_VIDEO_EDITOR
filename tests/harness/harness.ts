@@ -87,8 +87,14 @@ async function generateFixture(options: {
   width: number
   height: number
   fps: number
+  /** Shifts the palette, so two fixtures are never mistaken for each other. */
+  hueOffset?: number
+  /** Draws the moving marker as a bar or a block, likewise. */
+  marker?: 'bar' | 'block'
 }) {
   const { frames, width, height, fps } = options
+  const hueOffset = options.hueOffset ?? 0
+  const marker = options.marker ?? 'bar'
   const format = new Mp4OutputFormat()
 
   const codec = await getFirstEncodableVideoCodec(
@@ -108,11 +114,20 @@ async function generateFixture(options: {
 
   for (let index = 0; index < frames; index++) {
     // Flat blocks keep the clip small and compress near-losslessly.
-    context.fillStyle = `hsl(${(index * 7) % 360} 70% 45%)`
+    context.fillStyle = `hsl(${(index * 7 + hueOffset) % 360} 70% 45%)`
     context.fillRect(0, 0, width, height)
 
     context.fillStyle = '#ffffff'
-    context.fillRect((index * 3) % width, 0, 24, height)
+    if (marker === 'bar') {
+      context.fillRect((index * 3) % width, 0, 24, height)
+    } else {
+      context.fillRect(
+        (index * 5) % Math.max(1, width - 40),
+        height - 48,
+        40,
+        40,
+      )
+    }
 
     context.fillStyle = '#000000'
     context.font = 'bold 64px monospace'
@@ -131,41 +146,47 @@ async function generateFixture(options: {
 
 export type ProjectSpec = {
   composition: { width: number; height: number }
-  sourceUrl: string
-  sourceDurationMicros: number
+  sources: { id: string; url: string }[]
   clips: {
+    sourceId: string
     sourceInMicros: number
     sourceOutMicros: number
     timelineStartMicros: number
   }[]
 }
 
-/** Builds a project from `spec` and hands it to the player. */
-async function loadFromFile(
-  file: File,
-  spec: Omit<ProjectSpec, 'sourceUrl'>,
-): Promise<{ width: number; height: number; durationMicros: number }> {
+async function fetchAsFile(url: string, name: string): Promise<File> {
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`Could not fetch ${url}.`)
+  return new File([await response.arrayBuffer()], name, { type: 'video/mp4' })
+}
+
+/** Builds a project from `spec`, however many sources it names, and loads it. */
+async function loadProject(spec: ProjectSpec) {
   const store = useTimelineStore.getState()
   store.reset()
   clearSourceFiles()
   lastError = null
 
-  const sourceId = 'src-fixture'
-  registerSourceFile(sourceId, file)
-
-  const geometry = await player.probeSource(sourceId, file)
-
   store.setComposition(spec.composition)
-  store.addSource({
-    id: sourceId,
-    name: file.name,
-    durationMicros: geometry.durationMicros,
-    width: geometry.width,
-    height: geometry.height,
-    rotation: geometry.rotation,
-  })
+
+  for (const source of spec.sources) {
+    const file = await fetchAsFile(source.url, `${source.id}.mp4`)
+    registerSourceFile(source.id, file)
+
+    const geometry = await player.probeSource(source.id, file)
+    store.addSource({
+      id: source.id,
+      name: source.url.split('/').pop() ?? source.id,
+      durationMicros: geometry.durationMicros,
+      width: geometry.width,
+      height: geometry.height,
+      rotation: geometry.rotation,
+    })
+  }
+
   spec.clips.forEach((clip, index) =>
-    store.addClip({ id: `clip-${index}`, sourceId, ...clip }),
+    store.addClip({ id: `clip-${index}`, ...clip }),
   )
 
   const project = useTimelineStore.getState().project
@@ -177,16 +198,6 @@ async function loadFromFile(
     height: project.composition.height,
     durationMicros: timelineDuration(project),
   }
-}
-
-async function loadProject(spec: ProjectSpec) {
-  const response = await fetch(spec.sourceUrl)
-  if (!response.ok) throw new Error(`Could not fetch ${spec.sourceUrl}.`)
-
-  const file = new File([await response.arrayBuffer()], 'fixture.mp4', {
-    type: 'video/mp4',
-  })
-  return loadFromFile(file, spec)
 }
 
 /** Loads the MP4 the last export produced as a single full-length clip. */
@@ -202,17 +213,32 @@ async function loadExported() {
   registerSourceFile(sourceId, file)
   const geometry = await player.probeSource(sourceId, file)
 
-  return loadFromFile(file, {
-    composition: { width: geometry.width, height: geometry.height },
-    sourceDurationMicros: geometry.durationMicros,
-    clips: [
-      {
-        sourceInMicros: 0,
-        sourceOutMicros: geometry.durationMicros,
-        timelineStartMicros: 0,
-      },
-    ],
+  store.setComposition({ width: geometry.width, height: geometry.height })
+  store.addSource({
+    id: sourceId,
+    name: 'exported.mp4',
+    durationMicros: geometry.durationMicros,
+    width: geometry.width,
+    height: geometry.height,
+    rotation: geometry.rotation,
   })
+  store.addClip({
+    id: 'clip-exported',
+    sourceId,
+    sourceInMicros: 0,
+    sourceOutMicros: geometry.durationMicros,
+    timelineStartMicros: 0,
+  })
+
+  const project = useTimelineStore.getState().project
+  player.setProject(project)
+  throwIfErrored()
+
+  return {
+    width: project.composition.width,
+    height: project.composition.height,
+    durationMicros: timelineDuration(project),
+  }
 }
 
 /** Renders one timeline position through the preview path, returns pixels. */

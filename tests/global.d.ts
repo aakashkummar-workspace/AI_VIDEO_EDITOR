@@ -13,9 +13,9 @@ declare global {
       }): Promise<number[]>
       loadProject(spec: {
         composition: { width: number; height: number }
-        sourceUrl: string
-        sourceDurationMicros: number
+        sources: { id: string; url: string }[]
         clips: {
+          sourceId: string
           sourceInMicros: number
           sourceOutMicros: number
           timelineStartMicros: number
@@ -40,6 +40,7 @@ declare global {
       frameCounts(): Promise<{
         worker: { created: number; closed: number }
         main: { created: number; closed: number }
+        openSources: number
       }>
       duration(): number
     }

@@ -4,7 +4,7 @@
  */
 import { writeFileSync } from 'node:fs'
 import { chromium } from '@playwright/test'
-import { FIXTURE } from '../tests/fixture.config.mjs'
+import { FIXTURE, FIXTURE_B } from '../tests/fixture.config.mjs'
 
 const browser = await chromium.launch()
 const page = await browser.newPage()
@@ -15,17 +15,21 @@ page.on('pageerror', (error) => console.log(`[pageerror] ${error.message}`))
 await page.goto('http://localhost:5173/tests/harness/')
 await page.waitForFunction(() => 'harness' in window)
 
-const bytes = await page.evaluate(
-  (options) => window.harness.generateFixture(options),
-  {
-    frames: FIXTURE.frames,
-    width: FIXTURE.width,
-    height: FIXTURE.height,
-    fps: FIXTURE.fps,
-  },
-)
+for (const fixture of [FIXTURE, FIXTURE_B]) {
+  const bytes = await page.evaluate(
+    (options) => window.harness.generateFixture(options),
+    {
+      frames: fixture.frames,
+      width: fixture.width,
+      height: fixture.height,
+      fps: fixture.fps,
+      hueOffset: fixture.hueOffset,
+      marker: fixture.marker,
+    },
+  )
 
-writeFileSync(FIXTURE.path, Buffer.from(bytes))
-console.log(`wrote ${FIXTURE.path} (${bytes.length} bytes)`)
+  writeFileSync(fixture.path, Buffer.from(bytes))
+  console.log(`wrote ${fixture.path} (${bytes.length} bytes)`)
+}
 
 await browser.close()

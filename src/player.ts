@@ -78,6 +78,7 @@ export function createPlayer(
   type FrameCountReport = {
     worker: { created: number; closed: number }
     main: { created: number; closed: number }
+    openSources: number
   }
   let pendingFrameCounts: ((report: FrameCountReport) => void) | null = null
   const pendingProbes = new Map<string, (geometry: SourceGeometry) => void>()
@@ -244,7 +245,11 @@ export function createPlayer(
         return
 
       case 'frameCounts':
-        pendingFrameCounts?.({ worker: message.counts, main: frameCounts() })
+        pendingFrameCounts?.({
+          worker: message.counts,
+          main: frameCounts(),
+          openSources: message.openSources,
+        })
         pendingFrameCounts = null
         return
 
@@ -284,8 +289,16 @@ export function createPlayer(
       resetStats()
 
       project = next
-      canvas.width = next.composition.width
-      canvas.height = next.composition.height
+
+      // Assigning width or height resets a canvas even when the value is
+      // unchanged, so only touch them when the composition really changed.
+      // Otherwise every edit blanks the preview for a frame and a drag flickers.
+      if (canvas.width !== next.composition.width) {
+        canvas.width = next.composition.width
+      }
+      if (canvas.height !== next.composition.height) {
+        canvas.height = next.composition.height
+      }
 
       send({ type: 'setProject', generation, project: next })
     },

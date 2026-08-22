@@ -64,3 +64,18 @@ body {
   background: red;
   pointer-events: none;
 }
+
+.media-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+
+.media-list li {
+  padding: 2px 0;
+}
+
+.media-meta {
+  color: #555;
+  font-size: 12px;
+}

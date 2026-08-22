@@ -58,6 +58,15 @@ type OpenSource = {
 const sources = new Map<string, OpenSource>()
 const files = new Map<string, File>()
 
+/**
+ * Drops a source and frees it. An Input holds open decoders and read state, so
+ * letting the reference go is not enough - it has to be disposed.
+ */
+function closeSource(sourceId: string) {
+  sources.get(sourceId)?.input.dispose()
+  sources.delete(sourceId)
+}
+
 let project: Project | null = null
 
 /** Bumped by the UI thread on every play/seek/stop; stale work is abandoned. */
@@ -384,7 +393,7 @@ async function exportMp4(myGeneration: number) {
 
 async function probeSource(sourceId: string, file: File, myGeneration: number) {
   files.set(sourceId, file)
-  sources.delete(sourceId)
+  closeSource(sourceId)
 
   const { geometry } = await openSource(sourceId)
   scope.postMessage({
@@ -411,7 +420,7 @@ scope.addEventListener('message', (event) => {
       // Drop sources the project no longer references.
       for (const sourceId of [...sources.keys()]) {
         if (!message.project.sources[sourceId]) {
-          sources.delete(sourceId)
+          closeSource(sourceId)
           files.delete(sourceId)
         }
       }
@@ -447,6 +456,7 @@ scope.addEventListener('message', (event) => {
         type: 'frameCounts',
         generation: message.generation,
         counts: frameCounts(),
+        openSources: sources.size,
       })
       return
   }
