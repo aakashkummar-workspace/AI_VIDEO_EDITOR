@@ -5,6 +5,7 @@ body {
 
 .timeline {
   overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid #999;
   margin-top: 12px;
 }

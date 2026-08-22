@@ -1,11 +1,13 @@
-import type { MouseEvent } from 'react'
+import { useEffect, useRef, type MouseEvent } from 'react'
 import {
-  PIXELS_PER_SECOND,
+  DEFAULT_PIXELS_PER_SECOND,
   clampToTimeline,
   microsToPixels,
   pixelsToMicros,
   rulerTicks,
   trackWidth,
+  zoomAround,
+  ZOOM_STEP,
 } from '../timeline/layout'
 import { clipZoneAt, type DragMode } from '../timeline/dragging'
 import { timelineDuration } from '../timeline/operations'
@@ -18,6 +20,8 @@ export type TimelineProps = {
   onSeek: (timelineMicros: number) => void
   onClipGrab: (clipId: string, mode: DragMode, clientX: number) => void
   pixelsPerSecond?: number
+  /** Reports a zoom the timeline initiated, e.g. ctrl+wheel. */
+  onZoom?: (pixelsPerSecond: number) => void | undefined
 }
 
 const CURSOR_FOR: Record<DragMode, string> = {
@@ -32,11 +36,45 @@ export default function Timeline({
   currentMicros,
   onSeek,
   onClipGrab,
-  pixelsPerSecond = PIXELS_PER_SECOND,
+  pixelsPerSecond = DEFAULT_PIXELS_PER_SECOND,
+  onZoom = () => {},
 }: TimelineProps) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+
   const duration = timelineDuration(project)
   const width = trackWidth(duration, pixelsPerSecond)
   const ticks = rulerTicks(duration, pixelsPerSecond)
+
+  // Wheel zoom is bound by hand rather than via onWheel, because React attaches
+  // wheel listeners passively and a passive listener cannot preventDefault -
+  // the browser would zoom the whole page instead.
+  useEffect(() => {
+    const element = scrollRef.current
+    if (!element) return
+
+    function onWheel(event: WheelEvent) {
+      if (!event.ctrlKey && !event.metaKey) return
+      event.preventDefault()
+
+      const strip = scrollRef.current
+      if (!strip) return
+
+      const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP
+      const next = zoomAround({
+        pixelsPerSecond,
+        scrollLeft: strip.scrollLeft,
+        cursorOffsetPixels:
+          event.clientX - strip.getBoundingClientRect().left,
+        factor,
+      })
+
+      strip.scrollLeft = next.scrollLeft
+      onZoom(next.pixelsPerSecond)
+    }
+
+    element.addEventListener('wheel', onWheel, { passive: false })
+    return () => element.removeEventListener('wheel', onWheel)
+  }, [pixelsPerSecond, onZoom])
 
   function handleClick(event: MouseEvent<HTMLDivElement>) {
     const bounds = event.currentTarget.getBoundingClientRect()
@@ -50,7 +88,7 @@ export default function Timeline({
   }
 
   return (
-    <div className="timeline">
+    <div className="timeline" ref={scrollRef} data-testid="timeline-scroll">
       <div
         className="timeline-inner"
         style={{ width }}

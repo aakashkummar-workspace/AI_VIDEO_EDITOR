@@ -9,7 +9,13 @@ import {
   type ClipDrag,
   type DragMode,
 } from './timeline/dragging'
-import { pixelsToMicros } from './timeline/layout'
+import {
+  DEFAULT_PIXELS_PER_SECOND,
+  ZOOM_STEP,
+  clampZoom,
+  fitPixelsPerSecond,
+  pixelsToMicros,
+} from './timeline/layout'
 import { timelineDuration } from './timeline/operations'
 import { registerSourceFile } from './timeline/sourceRegistry'
 import { useTimelineStore } from './timeline/store'
@@ -37,6 +43,9 @@ export default function App() {
   const [exportPercent, setExportPercent] = useState<number | null>(null)
   /** What the timeline and canvas show mid-drag, before anything is committed. */
   const [previewProject, setPreviewProject] = useState<Project | null>(null)
+  const [pixelsPerSecond, setPixelsPerSecond] = useState(
+    DEFAULT_PIXELS_PER_SECOND,
+  )
 
   const dragRef = useRef<ActiveDrag | null>(null)
   /**
@@ -97,6 +106,12 @@ export default function App() {
   /** Where a gesture in progress wants the preview parked. */
   const previewTargetRef = useRef<number | null>(null)
 
+  // The window mouse handlers are bound once, so they read the zoom from here.
+  const zoomRef = useRef(pixelsPerSecond)
+  useEffect(() => {
+    zoomRef.current = pixelsPerSecond
+  }, [pixelsPerSecond])
+
   /**
    * The worker renders whatever the project says, so any change republishes
    * it - and then re-renders the current position, because the same moment on
@@ -147,7 +162,10 @@ export default function App() {
       const drag = dragRef.current
       if (!drag) return
 
-      const deltaMicros = pixelsToMicros(event.clientX - drag.startClientX)
+      const deltaMicros = pixelsToMicros(
+        event.clientX - drag.startClientX,
+        zoomRef.current,
+      )
       if (deltaMicros === 0 && !drag.moved) return
       drag.moved = true
 
@@ -175,7 +193,10 @@ export default function App() {
       const gesture: ClipDrag = {
         clipId: drag.clipId,
         mode: drag.mode,
-        deltaMicros: pixelsToMicros(event.clientX - drag.startClientX),
+        deltaMicros: pixelsToMicros(
+          event.clientX - drag.startClientX,
+          zoomRef.current,
+        ),
       }
       const operation = dragToOperation(projectRef.current, gesture)
       if (!operation) return
@@ -300,6 +321,13 @@ export default function App() {
   const hasTimeline = duration > 0
   const sources = Object.values(displayProject.sources)
 
+  /** Zooms so the whole timeline fits the visible strip. */
+  function fitZoom() {
+    const strip = document.querySelector('[data-testid=timeline-scroll]')
+    const available = strip?.clientWidth ?? window.innerWidth
+    setPixelsPerSecond(fitPixelsPerSecond(duration, available))
+  }
+
   return (
     <div>
       <h1>Playback</h1>
@@ -333,6 +361,27 @@ export default function App() {
         <span data-testid="time">
           {formatMicros(currentMicros)} / {formatMicros(duration)}
         </span>
+      </p>
+
+      <p>
+        <button
+          type="button"
+          data-testid="zoom-out"
+          onClick={() => setPixelsPerSecond((zoom) => clampZoom(zoom / ZOOM_STEP))}
+        >
+          -
+        </button>{' '}
+        <button
+          type="button"
+          data-testid="zoom-in"
+          onClick={() => setPixelsPerSecond((zoom) => clampZoom(zoom * ZOOM_STEP))}
+        >
+          +
+        </button>{' '}
+        <button type="button" data-testid="zoom-fit" onClick={fitZoom}>
+          Fit
+        </button>{' '}
+        <span data-testid="zoom">{Math.round(pixelsPerSecond)} px/s</span>
       </p>
 
       {exportPercent !== null && <p>Exporting: {exportPercent}%</p>}
@@ -381,6 +430,8 @@ export default function App() {
           seekFromUser(micros)
         }}
         onClipGrab={handleClipGrab}
+        pixelsPerSecond={pixelsPerSecond}
+        onZoom={setPixelsPerSecond}
       />
     </div>
   )
