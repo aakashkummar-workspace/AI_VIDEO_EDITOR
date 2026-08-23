@@ -5,8 +5,10 @@ import {
   EXPORT_QUALITIES,
   exportSettingsOf,
   MIN_SEGMENT_MICROS,
+  TRANSITION_KINDS,
   clampEffectAmount,
   clampProperty,
+  transitionProgress,
   findSegment,
   occludesEverything,
   segmentCovers,
@@ -25,6 +27,7 @@ import {
   type ExportSettings,
   type Keyframes,
   type SoundContent,
+  type TransitionKind,
   type Track,
   type TrackKind,
   type VideoContent,
@@ -97,6 +100,18 @@ function sortSegments(track: Track): void {
   track.segments.sort((a, b) => a.timelineStartMicros - b.timelineStartMicros)
 }
 
+/**
+ * How much two segments are allowed to sit on top of one another.
+ *
+ * Zero, except where a transition explains it: a dissolve needs both sides on
+ * screen at once, so the incoming segment is allowed to reach back into the
+ * outgoing one by exactly the transition's length and not a microsecond more.
+ */
+function allowedOverlapMicros(earlier: Segment, later: Segment): number {
+  if (later.timelineStartMicros < earlier.timelineStartMicros) return 0
+  return later.transitionIn?.durationMicros ?? 0
+}
+
 /** Throws if `candidate` would overlap anything else on a track that forbids it. */
 function assertNoOverlap(track: Track, candidate: Segment): void {
   if (trackAllowsOverlap(track.kind)) return
@@ -106,7 +121,18 @@ function assertNoOverlap(track: Track, candidate: Segment): void {
 
   for (const segment of track.segments) {
     if (segment.id === candidate.id) continue
-    if (start < segmentEndMicros(segment) && segment.timelineStartMicros < end) {
+
+    const overlapStart = Math.max(start, segment.timelineStartMicros)
+    const overlapEnd = Math.min(end, segmentEndMicros(segment))
+    const overlap = overlapEnd - overlapStart
+    if (overlap <= 0) continue
+
+    const [earlier, later] =
+      segment.timelineStartMicros <= start
+        ? [segment, candidate]
+        : [candidate, segment]
+
+    if (overlap > allowedOverlapMicros(earlier, later)) {
       throw new Error(
         `A segment at ${start}us would overlap segment ${segment.id}.`,
       )
@@ -230,6 +256,13 @@ export type EffectAmountInput = {
   segmentId: string
   effectId: string
   amount: number
+}
+
+export type TransitionInput = {
+  /** The INCOMING segment: the one being blended into. */
+  segmentId: string
+  kind: TransitionKind
+  durationMicros: number
 }
 
 export type EffectKeyframeInput = {
@@ -696,6 +729,86 @@ export const mutators = {
   },
 
   /**
+   * Blends the segment before this one into it.
+   *
+   * The cost is time: the incoming segment and everything after it on the row
+   * slide earlier by the transition's length, so the two overlap by exactly
+   * that much and the project gets that much shorter. That is what a
+   * transition IS - without it there is no moment when both are on screen.
+   */
+  setTransition(project: Project, args: TransitionInput): void {
+    assertIntegerMicros(args.durationMicros, 'durationMicros')
+
+    if (!TRANSITION_KINDS.includes(args.kind)) {
+      throw new Error(`Unknown transition ${args.kind}.`)
+    }
+    if (args.durationMicros < MIN_SEGMENT_MICROS) {
+      throw new Error('A transition must have a positive duration.')
+    }
+
+    const { track, segment, index } = requireSegment(project, args.segmentId)
+    if (trackAllowsOverlap(track.kind)) {
+      throw new Error(
+        `A ${track.kind} row has no cuts to put a transition at.`,
+      )
+    }
+
+    const previous = track.segments[index - 1]
+    if (!previous) {
+      throw new Error(
+        `Segment ${args.segmentId} has nothing before it to blend from.`,
+      )
+    }
+
+    const already = segment.transitionIn?.durationMicros ?? 0
+    if (segmentEndMicros(previous) - already !== segment.timelineStartMicros) {
+      throw new Error(
+        `A transition needs the two segments to meet; there is a gap before` +
+          ` ${args.segmentId}.`,
+      )
+    }
+
+    // Neither side may be eaten entirely, and the segment before must have
+    // room left over after whatever transition it already carries.
+    const roomBefore =
+      segmentDuration(previous) -
+      (previous.transitionIn?.durationMicros ?? 0)
+    const roomAfter = segmentDuration(segment)
+    const longest = Math.min(roomBefore, roomAfter)
+
+    if (longest < MIN_SEGMENT_MICROS) {
+      throw new Error(
+        `There is no room for a transition between ${previous.id} and` +
+          ` ${segment.id}.`,
+      )
+    }
+
+    const duration = Math.min(args.durationMicros, longest)
+
+    // Undo whatever the previous transition had shifted, then shift by the new
+    // one, so setting a transition twice is not cumulative.
+    const shift = duration - already
+    for (let i = index; i < track.segments.length; i++) {
+      track.segments[i]!.timelineStartMicros -= shift
+    }
+
+    segment.transitionIn = { kind: args.kind, durationMicros: duration }
+  },
+
+  /** Takes a transition off, giving back the time it was costing. */
+  removeTransition(project: Project, segmentId: string): void {
+    const { track, segment, index } = requireSegment(project, segmentId)
+    const existing = segment.transitionIn
+    if (!existing) return
+
+    for (let i = index; i < track.segments.length; i++) {
+      track.segments[i]!.timelineStartMicros += existing.durationMicros
+    }
+
+    delete segment.transitionIn
+  },
+
+  /**
    * Cuts the segment under `timelineMicros` in two.
    *
    * A cut in empty space, or exactly on a boundary, is a no-op: neither half
@@ -800,6 +913,17 @@ export const splitSegmentAt = (
   project: Project,
   input: SplitSegmentInput,
 ): Project => produce(project, (draft) => mutators.splitSegmentAt(draft, input))
+
+export const setTransition = (
+  project: Project,
+  args: TransitionInput,
+): Project => produce(project, (draft) => mutators.setTransition(draft, args))
+
+export const removeTransition = (
+  project: Project,
+  segmentId: string,
+): Project =>
+  produce(project, (draft) => mutators.removeTransition(draft, segmentId))
 
 export const setSegmentProperties = (
   project: Project,
@@ -929,22 +1053,33 @@ export function visibleVideoSegmentsAt(
     const track = project.tracks[i]!
     if (track.kind !== 'video') continue
 
-    const segment = track.segments.find((candidate) =>
+    // Usually one, but two while a transition is running: the outgoing
+    // segment and the incoming one blending over it. Later in the list means
+    // later on the row, which is also the order they are drawn in.
+    const covering = track.segments.filter((candidate) =>
       segmentCovers(candidate, timelineMicros),
     )
-    if (!segment) continue
+    if (covering.length === 0) continue
 
-    const content = segment.content as VideoContent
-    stack.push({
-      track,
-      segment,
-      sourceMicros:
-        content.sourceInMicros + (timelineMicros - segment.timelineStartMicros),
-    })
-
-    if (
-      occludesEverything(
+    for (let c = covering.length - 1; c >= 0; c--) {
+      const segment = covering[c]!
+      const content = segment.content as VideoContent
+      stack.push({
+        track,
         segment,
+        sourceMicros:
+          content.sourceInMicros +
+          (timelineMicros - segment.timelineStartMicros),
+      })
+    }
+
+    // Only the topmost of the row can hide what is under it, and only if it
+    // is not itself being blended into.
+    const top = covering[covering.length - 1]!
+    if (
+      transitionProgress(top, timelineMicros) === null &&
+      occludesEverything(
+        top,
         project.composition,
         project.sources,
         timelineMicros,

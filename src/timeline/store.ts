@@ -12,6 +12,7 @@ import {
   type SegmentPropertiesInput,
   type SplitSegmentInput,
   type TextStyleInput,
+  type TransitionInput,
   type TrimInput,
 } from './operations'
 import {
@@ -59,6 +60,8 @@ export type TimelineStore = {
   trimSegmentStart: (input: TrimInput) => void
   trimSegmentEnd: (input: TrimInput) => void
   splitSegmentAt: (input: SplitSegmentInput) => void
+  setTransition: (input: TransitionInput) => void
+  removeTransition: (segmentId: string) => void
   setTextStyle: (input: TextStyleInput) => void
 
   setSegmentProperties: (input: SegmentPropertiesInput) => void
@@ -193,6 +196,15 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     trimSegmentStart: (input) => apply(mutators.trimSegmentStart, input),
     trimSegmentEnd: (input) => apply(mutators.trimSegmentEnd, input),
     splitSegmentAt: (input) => apply(mutators.splitSegmentAt, input),
+    /** Dragging the length of a transition is one edit, like any other slider. */
+    setTransition: (input) =>
+      apply(
+        mutators.setTransition,
+        input,
+        `transition:${input.segmentId}`,
+      ),
+    removeTransition: (segmentId) =>
+      apply(mutators.removeTransition, segmentId),
     /**
      * The key names the segment and the exact fields being changed, so typing
      * merges with typing but a nudge of x afterwards starts its own step.

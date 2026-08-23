@@ -31,9 +31,11 @@ import {
 } from './timeline/sourceRegistry'
 import { useTimelineStore } from './timeline/store'
 import {
+  DEFAULT_TRANSITION_MICROS,
   EFFECT_KINDS,
   EXPORT_HEIGHTS,
   EXPORT_QUALITIES,
+  TRANSITION_KINDS,
   effectAmountAt,
   exportDimensions,
   exportSettingsOf,
@@ -41,6 +43,7 @@ import {
   propertyAt,
   soundContent,
   sourceHasVideo,
+  trackOf,
   videoContent,
   hasKeyframeAt,
   isPropertyAnimated,
@@ -48,6 +51,7 @@ import {
   textContent,
   type AnimatableProperty,
   type EffectKind,
+  type TransitionKind,
   type Project,
   type Segment,
   type TrackKind,
@@ -824,6 +828,22 @@ export default function App() {
     ? soundContent(selectedSegment) !== undefined
     : false
 
+  /**
+   * Whether the selection has a cut before it worth blending across: it must
+   * be on a packed row, with something immediately before it.
+   */
+  const selectedTrack =
+    selectedSegmentId && selectedSegment
+      ? trackOf(displayProject, selectedSegmentId)
+      : undefined
+  const selectedIndex = selectedTrack && selectedSegment
+    ? selectedTrack.segments.indexOf(selectedSegment)
+    : -1
+  const canTransition =
+    selectedTrack !== undefined &&
+    selectedTrack.kind !== 'text' &&
+    selectedIndex > 0
+
   /** Zooms so the whole timeline fits the visible strip. */
   function fitZoom() {
     const strip = document.querySelector('[data-testid=timeline-scroll]')
@@ -1188,6 +1208,77 @@ export default function App() {
             <div className="transform-form">
               {TRANSFORM_FIELDS.map(propertyField)}
             </div>
+          </section>
+        )}
+
+        {selectedSegment && selectedSegmentId && canTransition && (
+          <section className="panel" data-testid="transition-panel">
+            <h2 className="panel-title">Transition in</h2>
+            <div className="transform-form">
+              <label className="transform-field">
+                <span className="transform-label">blend</span>
+                <select
+                  data-testid="transition-kind"
+                  value={selectedSegment.transitionIn?.kind ?? 'none'}
+                  onChange={(event) => {
+                    const store = useTimelineStore.getState()
+                    if (event.target.value === 'none') {
+                      store.removeTransition(selectedSegmentId)
+                      return
+                    }
+                    store.setTransition({
+                      segmentId: selectedSegmentId,
+                      kind: event.target.value as TransitionKind,
+                      durationMicros:
+                        selectedSegment.transitionIn?.durationMicros ??
+                        DEFAULT_TRANSITION_MICROS,
+                    })
+                  }}
+                >
+                  <option value="none">none</option>
+                  {TRANSITION_KINDS.map((kind) => (
+                    <option key={kind} value={kind}>
+                      {kind}
+                    </option>
+                  ))}
+                </select>
+                <span />
+              </label>
+
+              {selectedSegment.transitionIn && (
+                <label className="transform-field">
+                  <span className="transform-label">seconds</span>
+                  <input
+                    type="number"
+                    step={0.1}
+                    min={0.1}
+                    data-testid="transition-seconds"
+                    value={
+                      Math.round(
+                        (selectedSegment.transitionIn.durationMicros / 1e6) *
+                          100,
+                      ) / 100
+                    }
+                    onBlur={() => useTimelineStore.getState().endCoalescing()}
+                    onChange={(event) => {
+                      const seconds = Number(event.target.value)
+                      if (!Number.isFinite(seconds) || seconds <= 0) return
+
+                      useTimelineStore.getState().setTransition({
+                        segmentId: selectedSegmentId,
+                        kind: selectedSegment.transitionIn!.kind,
+                        durationMicros: Math.round(seconds * 1e6),
+                      })
+                    }}
+                  />
+                  <span />
+                </label>
+              )}
+            </div>
+            <p className="panel-note">
+              A blend costs time: the clip and everything after it move earlier
+              by its length, so the project gets that much shorter.
+            </p>
           </section>
         )}
 

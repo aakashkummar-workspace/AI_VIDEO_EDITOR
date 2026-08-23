@@ -20,6 +20,7 @@ import {
   EFFECT_KINDS,
   EXPORT_QUALITIES,
   MIN_SEGMENT_MICROS,
+  TRANSITION_KINDS,
   type AnimatableProperty,
   type Effect,
   type EffectKind,
@@ -33,6 +34,8 @@ import {
   type Source,
   type Track,
   type TrackKind,
+  type Transition,
+  type TransitionKind,
 } from './types'
 
 /**
@@ -220,6 +223,26 @@ function parseEffects(value: unknown, what: string): Effect[] | undefined {
   return effects.length > 0 ? effects : undefined
 }
 
+function parseTransition(
+  value: unknown,
+  what: string,
+): Transition | undefined {
+  if (value === undefined) return undefined
+
+  const raw = record(value, what)
+  const kind = str(raw.kind, `${what} kind`)
+  if (!TRANSITION_KINDS.includes(kind as TransitionKind)) {
+    fail(`${what} is a transition this version does not know (${kind}).`)
+  }
+
+  const durationMicros = micros(raw.durationMicros, `${what} duration`)
+  if (durationMicros < MIN_SEGMENT_MICROS) {
+    fail(`${what} has no duration.`)
+  }
+
+  return { kind: kind as TransitionKind, durationMicros }
+}
+
 function parseContent(value: unknown, what: string): SegmentContent {
   const raw = record(value, what)
   const kind = str(raw.kind, `${what} kind`)
@@ -276,6 +299,12 @@ function parseSegment(value: unknown, what: string): Segment {
 
   const effects = parseEffects(raw.effects, `${what} effects`)
   if (effects) segment.effects = effects
+
+  const transitionIn = parseTransition(
+    raw.transitionIn,
+    `${what} transition`,
+  )
+  if (transitionIn) segment.transitionIn = transitionIn
 
   return segment
 }
@@ -341,10 +370,17 @@ function assertConsistent(project: Project): void {
         }
       }
 
-      // Only a packed row: a text row is allowed to stack captions.
+      // Only a packed row: a text row is allowed to stack captions. A
+      // transition is the one overlap allowed, and only by its own length.
       if (track.kind !== 'text') {
-        if (segment.timelineStartMicros < previousEnd) {
+        const allowed = segment.transitionIn?.durationMicros ?? 0
+        if (segment.timelineStartMicros < previousEnd - allowed) {
           fail(`segments overlap on row ${track.id}.`)
+        }
+        if (allowed > 0 && previousEnd < 0) {
+          fail(
+            `segment ${segment.id} blends from something that is not there.`,
+          )
         }
         previousEnd = segment.timelineStartMicros + duration
       }

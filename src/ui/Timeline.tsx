@@ -14,6 +14,7 @@ import { timelineDuration } from '../timeline/operations'
 import {
   segmentDuration,
   textContent,
+  transitionWindow,
   type Project,
   type Segment,
   type Track,
@@ -206,6 +207,21 @@ export default function Timeline({
                     )
                   }}
                 >
+                  {/* The stretch where this segment and the one before it
+                      are both on screen. */}
+                  {transitionWindow(segment) && (
+                    <span
+                      className="timeline-transition"
+                      data-testid="transition-marker"
+                      data-segment-id={segment.id}
+                      style={{
+                        width: microsToPixels(
+                          segment.transitionIn!.durationMicros,
+                          pixelsPerSecond,
+                        ),
+                      }}
+                    />
+                  )}
                   <span className="timeline-clip-label">
                     {segmentLabel(project, segment)}
                   </span>

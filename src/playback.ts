@@ -3,10 +3,13 @@ import {
   OVERLAY_FONT_FAMILY,
   filterFor,
   transformAt,
+  transitionAlphas,
+  transitionProgress,
   type Project,
   type Rotation,
   type Segment,
   type TextContent,
+  type Track,
   type Transform,
 } from './timeline/types'
 
@@ -142,7 +145,10 @@ export function renderFrame(
   context.fillRect(0, 0, width, height)
   context.restore()
 
-  for (const { segment } of visibleVideoSegmentsAt(project, timelineMicros)) {
+  for (const { track, segment } of visibleVideoSegmentsAt(
+    project,
+    timelineMicros,
+  )) {
     const frame = layers.get(segment.id)
     if (!frame) continue
 
@@ -152,12 +158,25 @@ export function renderFrame(
     const source = project.sources[content.sourceId]
     if (!source) continue
 
+    const blend = transitionBlendAt(track, segment, timelineMicros)
+    if (blend.alpha <= 0) continue
+
+    const transform = transformAt(segment, timelineMicros)
     const rect = fitRect(source.width, source.height, width, height)
+
     withTransform(
       context,
-      transformAt(segment, timelineMicros),
+      { ...transform, opacity: transform.opacity * blend.alpha },
       { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
       () => {
+        if (blend.wipeFraction !== null) {
+          // A wipe reveals rather than fades: the incoming picture is drawn
+          // solid, through a window that grows across the composition.
+          context.beginPath()
+          context.rect(0, 0, width * blend.wipeFraction, height)
+          context.clip()
+        }
+
         context.filter = filterFor(
           segment.effects,
           timelineMicros - segment.timelineStartMicros,
@@ -190,6 +209,43 @@ export function renderFrame(
       },
     )
   }
+}
+
+/**
+ * How a segment is blended at this moment, given the transitions around it.
+ *
+ * A segment is the INCOMING side of its own `transitionIn`, and the OUTGOING
+ * side of the one on the segment after it. Away from either it is drawn
+ * solid, which is every frame in a project with no transitions at all - so
+ * this cannot change what an untransitioned timeline looks like.
+ */
+export function transitionBlendAt(
+  track: Track,
+  segment: Segment,
+  timelineMicros: number,
+): { alpha: number; wipeFraction: number | null } {
+  const incoming = transitionProgress(segment, timelineMicros)
+  if (incoming !== null) {
+    const kind = segment.transitionIn!.kind
+    return {
+      alpha: transitionAlphas(kind, incoming).incoming,
+      wipeFraction: kind === 'wipe' ? incoming : null,
+    }
+  }
+
+  const index = track.segments.indexOf(segment)
+  const next = index >= 0 ? track.segments[index + 1] : undefined
+  if (next) {
+    const outgoing = transitionProgress(next, timelineMicros)
+    if (outgoing !== null) {
+      return {
+        alpha: transitionAlphas(next.transitionIn!.kind, outgoing).outgoing,
+        wipeFraction: null,
+      }
+    }
+  }
+
+  return { alpha: 1, wipeFraction: null }
 }
 
 /**

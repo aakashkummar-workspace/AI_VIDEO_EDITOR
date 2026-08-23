@@ -236,6 +236,36 @@ export type Effect = {
   keyframes?: Keyframe[]
 }
 
+/**
+ * A blend from the segment before this one into this one.
+ *
+ * Stored on the INCOMING segment, because that is the one it belongs to: it
+ * survives the outgoing segment being replaced, and there is exactly one
+ * answer to which transition applies at a boundary.
+ *
+ * A transition costs time. Two clips cannot dissolve into one another without
+ * both being on screen at once, and the material for that has to come from
+ * somewhere - so applying one slides the incoming segment (and everything
+ * after it) earlier by its duration, exactly as it does in CapCut, and the
+ * project gets that much shorter. The two segments then overlap by exactly the
+ * transition's length, which is the ONLY overlap a packed row allows.
+ */
+export type TransitionKind = 'crossfade' | 'dip-to-black' | 'wipe'
+
+export const TRANSITION_KINDS: TransitionKind[] = [
+  'crossfade',
+  'dip-to-black',
+  'wipe',
+]
+
+/** How long a transition lasts unless someone says otherwise. */
+export const DEFAULT_TRANSITION_MICROS = 500_000
+
+export type Transition = {
+  kind: TransitionKind
+  durationMicros: number
+}
+
 /** One item placed on a track. */
 export type Segment = {
   id: string
@@ -248,6 +278,8 @@ export type Segment = {
   keyframes?: Keyframes
   /** Applied in order, innermost first, when the segment is drawn. */
   effects?: Effect[]
+  /** A blend from the previous segment on the same row into this one. */
+  transitionIn?: Transition
 }
 
 /**
@@ -416,6 +448,64 @@ export function segmentDuration(segment: Segment): number {
 /** Exclusive end of a segment on the timeline. */
 export function segmentEndMicros(segment: Segment): number {
   return segment.timelineStartMicros + segmentDuration(segment)
+}
+
+/**
+ * The stretch of timeline a segment's incoming transition covers: its first
+ * `durationMicros`, during which the segment before it is still on screen.
+ */
+export function transitionWindow(
+  segment: Segment,
+): { startMicros: number; endMicros: number } | null {
+  const transition = segment.transitionIn
+  if (!transition || transition.durationMicros <= 0) return null
+
+  return {
+    startMicros: segment.timelineStartMicros,
+    endMicros: segment.timelineStartMicros + transition.durationMicros,
+  }
+}
+
+/** How far through its transition a segment is, from 0 at the start to 1. */
+export function transitionProgress(
+  segment: Segment,
+  timelineMicros: number,
+): number | null {
+  const window = transitionWindow(segment)
+  if (!window) return null
+  if (timelineMicros < window.startMicros) return null
+  if (timelineMicros >= window.endMicros) return null
+
+  const span = window.endMicros - window.startMicros
+  return (timelineMicros - window.startMicros) / span
+}
+
+/**
+ * How opaque each side of a transition is, part way through it.
+ *
+ * A crossfade draws the outgoing side solid and the incoming over it at the
+ * progress, because alpha compositing of `in` at p over `out` IS
+ * `in*p + out*(1-p)` - the dissolve comes out of the maths rather than being
+ * computed separately. A dip goes out through black and back, so both sides
+ * are partly transparent over the cleared composition and neither is visible
+ * at the midpoint. A wipe does not fade at all; it is handled by clipping, so
+ * both sides stay solid.
+ */
+export function transitionAlphas(
+  kind: TransitionKind,
+  progress: number,
+): { outgoing: number; incoming: number } {
+  switch (kind) {
+    case 'crossfade':
+      return { outgoing: 1, incoming: progress }
+    case 'dip-to-black':
+      return {
+        outgoing: Math.max(0, 1 - progress * 2),
+        incoming: Math.max(0, progress * 2 - 1),
+      }
+    case 'wipe':
+      return { outgoing: 1, incoming: 1 }
+  }
 }
 
 /** Whether a segment covers `timelineMicros`. The tail is exclusive. */

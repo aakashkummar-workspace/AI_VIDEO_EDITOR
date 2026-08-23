@@ -41,6 +41,7 @@ import {
   segmentCovers,
   segmentEndMicros,
   soundContent,
+  transitionWindow,
   videoContent,
   volumeAt,
   type ExportQuality,
@@ -335,6 +336,105 @@ async function* walkTrack(
 }
 
 /**
+ * Walks only the TRANSITION WINDOWS of one video row.
+ *
+ * While a transition runs, its row has two segments on screen at once: the
+ * outgoing one, which the ordinary walk above is already producing, and the
+ * incoming one blending over it. One iterator cannot yield two streams, so the
+ * incoming side gets its own - and because a transition only ever involves a
+ * segment and its immediate neighbour, and two transitions are never allowed
+ * to overlap, one extra stream per row is always enough.
+ *
+ * The material is the incoming segment's OWN first frames. Nothing is decoded
+ * twice and no footage beyond a segment's range is needed: what used to play
+ * just after the cut now plays across it.
+ */
+async function* walkTransitions(
+  current: Project,
+  track: Track,
+  fromMicros: number,
+  myGeneration: number,
+): AsyncGenerator<RowFrame> {
+  const endMicros = timelineDuration(current)
+  let position = Math.max(0, fromMicros)
+
+  const windowOf = (segment: Segment) => transitionWindow(segment)
+
+  while (position < endMicros && myGeneration === generation) {
+    const active = track.segments.find((segment) => {
+      const window = windowOf(segment)
+      return (
+        window !== null &&
+        position >= window.startMicros &&
+        position < window.endMicros
+      )
+    })
+
+    if (!active) {
+      // Between transitions this row contributes no second picture at all.
+      const next = track.segments.find((segment) => {
+        const window = windowOf(segment)
+        return window !== null && window.startMicros > position
+      })
+
+      yield { timelineMicros: position, segmentId: null, frame: null }
+      position = next ? windowOf(next)!.startMicros : endMicros
+      continue
+    }
+
+    const window = windowOf(active)!
+    const content = videoContent(active)
+    const opened = content ? await openSource(content.sourceId) : null
+
+    if (!content || !opened?.track) {
+      yield { timelineMicros: position, segmentId: null, frame: null }
+      position = window.endMicros
+      continue
+    }
+
+    const sourceFrom =
+      content.sourceInMicros + (position - active.timelineStartMicros)
+    const sourceTo =
+      content.sourceInMicros + (window.endMicros - active.timelineStartMicros)
+
+    const samples = new VideoSampleSink(opened.track).samples(
+      microsToSeconds(sourceFrom),
+      microsToSeconds(sourceTo),
+    )
+
+    try {
+      for await (const sample of samples) {
+        if (myGeneration !== generation) {
+          sample.close()
+          return
+        }
+
+        const decodedMicros = Math.round(sample.microsecondTimestamp)
+        const frame = takeFrame(sample)
+        const timelineMicros = Math.max(
+          position,
+          active.timelineStartMicros +
+            (decodedMicros - content.sourceInMicros),
+        )
+
+        if (timelineMicros >= window.endMicros) {
+          frame.close()
+          break
+        }
+
+        yield { timelineMicros, segmentId: active.id, frame }
+      }
+    } finally {
+      await samples.return()
+    }
+
+    // The window is over: clear this stream so the blend stops.
+    yield { timelineMicros: window.endMicros, segmentId: null, frame: null }
+    position = window.endMicros
+  }
+}
+
+/**
  * The moments at which the picture can change without any video row producing
  * a frame: a caption appearing or disappearing.
  *
@@ -388,15 +488,16 @@ async function* walkTimeline(
   const start = Math.max(0, fromMicros)
   if (start >= endMicros) return
 
-  const tracks = videoTracks(current)
-  const iterators = tracks.map((track) =>
+  // Two streams per row: what it is playing, and what is blending into it.
+  const iterators = videoTracks(current).flatMap((track) => [
     walkTrack(current, track, start, myGeneration),
-  )
+    walkTransitions(current, track, start, myGeneration),
+  ])
 
-  /** What each row is showing now. Owned here, and closed here. */
-  const showing: (RowFrame | null)[] = tracks.map(() => null)
-  /** The next item each row has ready, peeked so the merge can order them. */
-  const peeked: (RowFrame | null)[] = tracks.map(() => null)
+  /** What each stream is showing now. Owned here, and closed here. */
+  const showing: (RowFrame | null)[] = iterators.map(() => null)
+  /** The next item each stream has ready, peeked so the merge can order them. */
+  const peeked: (RowFrame | null)[] = iterators.map(() => null)
 
   const edges = textEdgeTimes(current, start, endMicros)
   let edgeIndex = 0

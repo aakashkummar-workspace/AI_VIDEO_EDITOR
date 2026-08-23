@@ -124,6 +124,23 @@
   which is the honest answer to how big its picture is, and is what
   `sourceHasVideo` reads. Opening one must never set the composition:
   a piece of music has no shape to offer.
+- A packed row allows exactly ONE kind of overlap: a transition, and by
+  exactly its own length. Two clips cannot dissolve without both being
+  on screen, so applying one slides the incoming segment and everything
+  after it earlier, and the project gets that much shorter. Nothing
+  else may overlap, and `assertNoOverlap` is where that is decided.
+- No extra footage is needed for a transition, and none may be
+  invented: the incoming segment's own first frames play ACROSS the cut
+  instead of after it. If you ever find yourself reaching past a
+  segment's sourceOut, the model has been misunderstood.
+- A crossfade is not computed. Drawing the incoming side at progress p
+  over a solid outgoing side IS `in*p + out*(1-p)` - the dissolve falls
+  out of alpha compositing. Do not add a blend path beside it.
+- A transition needs two segments of ONE row on screen at once, which
+  one iterator cannot yield. Each video row therefore has two decode
+  streams: what it is playing, and what is blending into it. Two
+  transitions are never allowed to overlap, so two streams is always
+  enough - keep that invariant if you add anything here.
 - A draft file (`draft.ts`) is data off someone's disk: parse it field
   by field into a fresh object, never cast it. It carries no media, so
   reopening one leaves its sources offline until files are handed back.

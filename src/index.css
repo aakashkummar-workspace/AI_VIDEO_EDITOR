@@ -356,6 +356,21 @@ input[type='color'] {
   min-height: 26px;
 }
 
+/* The stretch a segment shares with the one before it. */
+.timeline-transition {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.22) 0 4px,
+    rgba(255, 255, 255, 0.05) 4px 8px
+  );
+  border-right: 1px solid rgba(255, 255, 255, 0.35);
+}
+
 .shortcuts dl {
   display: grid;
   grid-template-columns: auto 1fr;
