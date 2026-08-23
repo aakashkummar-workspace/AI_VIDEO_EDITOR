@@ -28,7 +28,7 @@ test.beforeEach(async ({ page }) => {
     throw error
   })
   await page.goto('/')
-  await page.setInputFiles('input[type=file]', FIXTURE.path)
+  await page.setInputFiles('[data-testid=media-input]', FIXTURE.path)
   await expect(page.getByTestId('clip')).toBeVisible()
 })
 
@@ -178,7 +178,23 @@ test('editing still uses the right times after a zoom', async ({ page }) => {
   await page.mouse.up()
 
   const clips = await page.evaluate(
-    () => window.__timelineStore.getState().project.videoTrack.clips,
+    () => {
+      const project = window.__timelineStore.getState().project
+      return project.tracks
+        .filter((track) => track.kind === 'video')
+        .flatMap((track) => track.segments)
+        .flatMap((segment) =>
+          segment.content.kind === 'video'
+            ? [
+                {
+                  id: segment.id,
+                  timelineStartMicros: segment.timelineStartMicros,
+                  ...segment.content,
+                },
+              ]
+            : [],
+        )
+    },
   )
   // Dragged two seconds' worth of pixels at the current zoom.
   expect(clips[0]!.timelineStartMicros).toBeGreaterThan(1.9 * SECOND)

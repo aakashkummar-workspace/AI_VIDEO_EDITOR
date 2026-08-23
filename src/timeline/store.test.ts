@@ -7,7 +7,14 @@ import {
   requireSourceFile,
 } from './sourceRegistry'
 import { useTimelineStore } from './store'
-import { clipDuration, type Source } from './types'
+import {
+  MAIN_TEXT_TRACK_ID,
+  MAIN_VIDEO_TRACK_ID,
+  segmentDuration,
+  type Segment,
+  type Source,
+  type TextContent,
+} from './types'
 
 const SECOND = 1_000_000
 
@@ -56,17 +63,28 @@ function store() {
   return useTimelineStore.getState()
 }
 
-function clips() {
-  return store().project.videoTrack.clips
+/** The segments on the main video row, which most of these tests work on. */
+function clips(): Segment[] {
+  const track = store().project.tracks.find(
+    (candidate) => candidate.id === MAIN_VIDEO_TRACK_ID,
+  )
+  if (!track) throw new Error('test setup: no video track')
+  return track.segments
 }
 
 function addBaseClip() {
-  store().addClip({
-    id: 'clip-1',
-    sourceId: source.id,
-    sourceInMicros: SECOND,
-    sourceOutMicros: 3 * SECOND,
-    timelineStartMicros: 0,
+  store().addSegment({
+    trackId: MAIN_VIDEO_TRACK_ID,
+    segment: {
+      id: 'clip-1',
+      timelineStartMicros: 0,
+      content: {
+        kind: 'video',
+        sourceId: source.id,
+        sourceInMicros: SECOND,
+        sourceOutMicros: 3 * SECOND,
+      },
+    },
   })
 }
 
@@ -87,7 +105,7 @@ describe('store', () => {
     addBaseClip()
 
     expect(clips()).toHaveLength(1)
-    expect(clipDuration(clips()[0]!)).toBe(2 * SECOND)
+    expect(segmentDuration(clips()[0]!)).toBe(2 * SECOND)
   })
 
   it('holds nothing but plain JSON', () => {
@@ -103,8 +121,8 @@ describe('store', () => {
     const undoDepth = store().past.length
 
     expect(() =>
-      store().moveClip({ clipId: 'nope', timelineStartMicros: 0 }),
-    ).toThrow(/No clip/)
+      store().moveSegment({ segmentId: 'nope', timelineStartMicros: 0 }),
+    ).toThrow(/No segment/)
 
     expect(store().project).toBe(before)
     expect(store().past).toHaveLength(undoDepth)
@@ -114,13 +132,13 @@ describe('store', () => {
 describe('undo and redo', () => {
   it('treats one operation as one undo step', () => {
     addBaseClip()
-    store().moveClip({ clipId: 'clip-1', timelineStartMicros: 5 * SECOND })
-    store().trimClipEnd({ clipId: 'clip-1', timelineMicros: 6 * SECOND })
+    store().moveSegment({ segmentId: 'clip-1', timelineStartMicros: 5 * SECOND })
+    store().trimSegmentEnd({ segmentId: 'clip-1', timelineMicros: 6 * SECOND })
 
     expect(store().past).toHaveLength(3)
 
     store().undo()
-    expect(clipDuration(clips()[0]!)).toBe(2 * SECOND)
+    expect(segmentDuration(clips()[0]!)).toBe(2 * SECOND)
     expect(clips()[0]!.timelineStartMicros).toBe(5 * SECOND)
 
     store().undo()
@@ -133,7 +151,7 @@ describe('undo and redo', () => {
 
   it('redoes back to exactly the same state', () => {
     addBaseClip()
-    store().splitClipAt({ timelineMicros: SECOND, newClipId: 'clip-1b' })
+    store().splitSegmentAt({ timelineMicros: SECOND, newSegmentId: 'clip-1b' })
     const afterSplit = store().project
 
     store().undo()
@@ -146,8 +164,8 @@ describe('undo and redo', () => {
 
   it('walks the whole history and back', () => {
     addBaseClip()
-    store().splitClipAt({ timelineMicros: SECOND, newClipId: 'clip-1b' })
-    store().moveClip({ clipId: 'clip-1b', timelineStartMicros: 6 * SECOND })
+    store().splitSegmentAt({ timelineMicros: SECOND, newSegmentId: 'clip-1b' })
+    store().moveSegment({ segmentId: 'clip-1b', timelineStartMicros: 6 * SECOND })
     const final = store().project
 
     store().undo()
@@ -163,11 +181,11 @@ describe('undo and redo', () => {
 
   it('drops the redo stack once a new edit is made', () => {
     addBaseClip()
-    store().moveClip({ clipId: 'clip-1', timelineStartMicros: 5 * SECOND })
+    store().moveSegment({ segmentId: 'clip-1', timelineStartMicros: 5 * SECOND })
     store().undo()
     expect(store().canRedo()).toBe(true)
 
-    store().trimClipEnd({ clipId: 'clip-1', timelineMicros: SECOND })
+    store().trimSegmentEnd({ segmentId: 'clip-1', timelineMicros: SECOND })
 
     expect(store().canRedo()).toBe(false)
     expect(store().future).toEqual([])
@@ -186,7 +204,7 @@ describe('undo and redo', () => {
     addBaseClip()
     const depth = store().past.length
 
-    store().splitClipAt({ timelineMicros: 9 * SECOND, newClipId: 'nothing' })
+    store().splitSegmentAt({ timelineMicros: 9 * SECOND, newSegmentId: 'nothing' })
 
     expect(store().past).toHaveLength(depth)
     expect(clips()).toHaveLength(1)
@@ -207,8 +225,8 @@ describe('undo and redo', () => {
     addBaseClip()
     const before = structuredClone(clips()[0]!)
 
-    store().trimClipStart({ clipId: 'clip-1', timelineMicros: 250_000 })
-    store().trimClipEnd({ clipId: 'clip-1', timelineMicros: 1_750_000 })
+    store().trimSegmentStart({ segmentId: 'clip-1', timelineMicros: 250_000 })
+    store().trimSegmentEnd({ segmentId: 'clip-1', timelineMicros: 1_750_000 })
     store().undo()
     store().undo()
 
@@ -236,7 +254,7 @@ describe('source registry', () => {
     // Guards the check above: it has to be able to fail.
     const smuggled = {
       sources: { 'src-a': { file: new File([], 'a.mp4') } },
-      videoTrack: { clips: [] },
+      tracks: [],
     }
 
     expect(nonJsonValues(smuggled)).toEqual(['$.sources.src-a.file: File'])
@@ -258,35 +276,50 @@ describe('source registry', () => {
 })
 
 describe('coalescing continuous edits', () => {
-  const overlay = {
+  const overlay: Segment = {
     id: 'text-1',
-    content: '',
-    x: 10,
-    y: 20,
-    sizePx: 32,
-    color: '#ffffff',
     timelineStartMicros: 0,
-    durationMicros: 2 * SECOND,
+    content: {
+      kind: 'text',
+      content: '',
+      x: 10,
+      y: 20,
+      sizePx: 32,
+      color: '#ffffff',
+      durationMicros: 2 * SECOND,
+    },
+  }
+
+  /** The style of the one caption these tests type into. */
+  function caption(): TextContent {
+    const track = store().project.tracks.find(
+      (candidate) => candidate.id === MAIN_TEXT_TRACK_ID,
+    )
+    const segment = track?.segments[0]
+    if (!segment || segment.content.kind !== 'text') {
+      throw new Error('test setup: no caption')
+    }
+    return segment.content
   }
 
   function type(text: string) {
     for (let length = 1; length <= text.length; length++) {
-      store().setOverlayStyle({
-        overlayId: overlay.id,
+      store().setTextStyle({
+        segmentId: overlay.id,
         content: text.slice(0, length),
       })
     }
   }
 
   beforeEach(() => {
-    store().addOverlay(overlay)
+    store().addSegment({ trackId: MAIN_TEXT_TRACK_ID, segment: overlay })
   })
 
   it('treats a run of typing as one undo step', () => {
     const depth = store().past.length
     type('CAPTION')
 
-    expect(store().project.overlays[0]!.content).toBe('CAPTION')
+    expect(caption().content).toBe('CAPTION')
     // Seven changes, one step - not one step per letter.
     expect(store().past).toHaveLength(depth + 1)
   })
@@ -295,7 +328,7 @@ describe('coalescing continuous edits', () => {
     type('CAPTION')
     store().undo()
 
-    expect(store().project.overlays[0]!.content).toBe('')
+    expect(caption().content).toBe('')
   })
 
   it('redoes the whole run at once', () => {
@@ -310,14 +343,14 @@ describe('coalescing continuous edits', () => {
   it('starts a new step for a different field', () => {
     const depth = store().past.length
     type('AB')
-    store().setOverlayStyle({ overlayId: overlay.id, x: 99 })
+    store().setTextStyle({ segmentId: overlay.id, x: 99 })
 
     expect(store().past).toHaveLength(depth + 2)
 
     // Undoing the nudge leaves the typing intact.
     store().undo()
-    expect(store().project.overlays[0]!.x).toBe(10)
-    expect(store().project.overlays[0]!.content).toBe('AB')
+    expect(caption().x).toBe(10)
+    expect(caption().content).toBe('AB')
   })
 
   it('starts a new step after leaving the field', () => {
@@ -328,13 +361,13 @@ describe('coalescing continuous edits', () => {
 
     expect(store().past).toHaveLength(depth + 2)
     store().undo()
-    expect(store().project.overlays[0]!.content).toBe('AB')
+    expect(caption().content).toBe('AB')
   })
 
   it('starts a new step after any other edit', () => {
     const depth = store().past.length
     type('AB')
-    store().moveOverlay({ overlayId: overlay.id, timelineStartMicros: SECOND })
+    store().moveSegment({ segmentId: overlay.id, timelineStartMicros: SECOND })
     type('CD')
 
     expect(store().past).toHaveLength(depth + 3)
@@ -348,6 +381,6 @@ describe('coalescing continuous edits', () => {
     // The redo of the first run is gone, and the second run stands alone.
     expect(store().canRedo()).toBe(false)
     store().undo()
-    expect(store().project.overlays[0]!.content).toBe('')
+    expect(caption().content).toBe('')
   })
 })

@@ -7,7 +7,23 @@ const B_DURATION = (FIXTURE_B.frames / FIXTURE_B.fps) * SECOND
 
 function clips(page: Page) {
   return page.evaluate(
-    () => window.__timelineStore.getState().project.videoTrack.clips,
+    () => {
+      const project = window.__timelineStore.getState().project
+      return project.tracks
+        .filter((track) => track.kind === 'video')
+        .flatMap((track) => track.segments)
+        .flatMap((segment) =>
+          segment.content.kind === 'video'
+            ? [
+                {
+                  id: segment.id,
+                  timelineStartMicros: segment.timelineStartMicros,
+                  ...segment.content,
+                },
+              ]
+            : [],
+        )
+    },
   )
 }
 
@@ -18,7 +34,7 @@ function composition(page: Page) {
 }
 
 async function loadFile(page: Page, path: string, expectedCount: number) {
-  await page.setInputFiles('input[type=file]', path)
+  await page.setInputFiles('[data-testid=media-input]', path)
   await expect(page.getByTestId('media-item')).toHaveCount(expectedCount)
 }
 

@@ -28,7 +28,7 @@ test.beforeEach(async ({ page }) => {
     throw error
   })
   await page.goto('/')
-  await page.setInputFiles('input[type=file]', FIXTURE.path)
+  await page.setInputFiles('[data-testid=media-input]', FIXTURE.path)
   await expect(page.getByTestId('clip')).toBeVisible()
 
   // Park the playhead at 1s so the head is clear of the left edge.
@@ -117,15 +117,19 @@ test('scrubbing does not add to the undo history', async ({ page }) => {
 test('the head does not move a clip it happens to sit over', async ({
   page,
 }) => {
-  const clipsBefore = await page.evaluate(
-    () => window.__timelineStore.getState().project.videoTrack.clips,
+  const clipsBefore = await page.evaluate(() =>
+    window.__timelineStore
+      .getState()
+      .project.tracks.flatMap((track) => track.segments),
   )
 
   await scrub(page, 2 * PIXELS_PER_SECOND)
 
   expect(
-    await page.evaluate(
-      () => window.__timelineStore.getState().project.videoTrack.clips,
+    await page.evaluate(() =>
+      window.__timelineStore
+        .getState()
+        .project.tracks.flatMap((track) => track.segments),
     ),
   ).toEqual(clipsBefore)
 })

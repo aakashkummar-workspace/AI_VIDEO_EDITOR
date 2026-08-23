@@ -11,6 +11,10 @@
  *   created, and closes are counted only for those frames. Frames the browser
  *   hands to mediabunny's decoder are created natively rather than through the
  *   constructor, so mediabunny closing its own samples is correctly ignored.
+ *   `clone()` counts as a creation too: a clone is a separate handle on the
+ *   same picture and has to be closed separately, which is exactly what makes
+ *   it a thing that can leak. Stacked rows rely on cloning, so without this the
+ *   counts would show more closes than creations and read as a double close.
  * - UI thread: it never constructs frames, so every close is counted.
  *
  * A clean run therefore satisfies: created === closedInWorker + closedOnMain.
@@ -37,6 +41,20 @@ export function installFrameTracking(scope: 'worker' | 'main'): void {
         return frame
       },
     })
+
+    // A clone of a tracked frame is tracked too, so that handing a row's
+    // picture to several composited items stays accounted for. A clone of an
+    // untracked frame - one of mediabunny's own - is left alone, for the same
+    // reason its close is.
+    const originalClone = OriginalVideoFrame.prototype.clone
+    OriginalVideoFrame.prototype.clone = function clone(this: VideoFrame) {
+      const copy = originalClone.call(this) as VideoFrame
+      if (tracked.has(this)) {
+        tracked.add(copy)
+        counts.created++
+      }
+      return copy
+    }
   }
 
   const originalClose = OriginalVideoFrame.prototype.close

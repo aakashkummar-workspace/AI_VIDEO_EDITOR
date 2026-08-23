@@ -4,6 +4,13 @@
  * keyed by the same sourceId used here.
  *
  * All times are integer microseconds.
+ *
+ * The shape follows the one every non-linear editor converges on, CapCut
+ * included: a project is an ordered stack of TRACKS, a track holds SEGMENTS,
+ * and a segment points at a MATERIAL (here, a Source) or carries its own
+ * content. A clip and a caption are the same kind of thing placed on
+ * different rows, which is why they share one set of move and trim
+ * operations rather than each having their own.
  */
 
 /** Clockwise rotation stored in a source's metadata. */
@@ -19,41 +26,491 @@ export type Source = {
   rotation: Rotation
 }
 
-export type Clip = {
-  id: string
+/**
+ * A segment that shows part of a source file.
+ *
+ * Its duration is not stored: it is the source range, and deriving it keeps
+ * the two from ever disagreeing.
+ */
+export type VideoContent = {
+  kind: 'video'
   sourceId: string
   /** Inclusive start of the used region within the source. */
   sourceInMicros: number
   /** Exclusive end of the used region within the source. */
   sourceOutMicros: number
-  /** Where the clip's head sits on the timeline. */
-  timelineStartMicros: number
 }
 
 /**
- * A line of text drawn over the composition for a stretch of the timeline.
+ * Text drawn over the composition.
  *
- * Unlike a clip it has no source, so its duration is stored rather than
- * derived, and overlays may overlap each other freely - two captions at once
- * is an ordinary thing to want.
+ * Unlike a video segment it has no source, so its duration is stored rather
+ * than derived. `content` may contain newlines, which are drawn as lines
+ * rather than escaped - a caption is usually more than one.
+ *
+ * Everything past `color` is optional and absent by default, so a caption made
+ * before any of it existed still renders exactly as it did.
  */
-export type Overlay = {
-  id: string
+export type TextContent = {
+  kind: 'text'
   content: string
-  /** Top-left corner, in composition pixels. */
+  /** Anchor point, in composition pixels. Which corner depends on `align`. */
   x: number
   y: number
   /** Cap height in composition pixels. */
   sizePx: number
   /** Any CSS colour the canvas will accept. */
   color: string
-  timelineStartMicros: number
+  durationMicros: number
+
+  /** One of FONT_FAMILIES. Absent means the default. */
+  fontFamily?: string
+  bold?: boolean
+  italic?: boolean
+  align?: TextAlign
+  /** Drawn under the fill, which is what makes text legible over footage. */
+  outlineWidthPx?: number
+  outlineColor?: string
+  shadowBlurPx?: number
+  shadowColor?: string
+  /** A box behind the text. Absent colour means no box at all. */
+  backgroundColor?: string
+  backgroundPaddingPx?: number
+}
+
+export type TextAlign = 'left' | 'center' | 'right'
+
+export const TEXT_ALIGNMENTS: TextAlign[] = ['left', 'center', 'right']
+
+/**
+ * The families on offer.
+ *
+ * Generic families only, deliberately: no font file is shipped and none is
+ * fetched, so every one of these resolves to something on any machine and
+ * renders the same in the preview and in the export, which are the same
+ * browser. A named webfont would have to be loaded before either could draw
+ * with it, and a race there would show up as an export that does not match.
+ */
+export const FONT_FAMILIES = [
+  'sans-serif',
+  'serif',
+  'monospace',
+  'system-ui',
+  'cursive',
+] as const
+
+/** How far apart lines of a caption sit, as a multiple of the size. */
+export const LINE_HEIGHT = 1.2
+
+/**
+ * A segment that plays part of a source file and draws nothing.
+ *
+ * The same shape as a video segment, because it is the same idea: a window
+ * onto a source. What differs is only that nobody asks it for a picture.
+ */
+export type AudioContent = {
+  kind: 'audio'
+  sourceId: string
+  sourceInMicros: number
+  sourceOutMicros: number
+}
+
+export type SegmentContent = VideoContent | TextContent | AudioContent
+
+/** Content that plays sound: a clip with an audio track, or audio on its own. */
+export type SoundContent = VideoContent | AudioContent
+
+export type SegmentKind = SegmentContent['kind']
+
+/**
+ * Where a segment is drawn, relative to where it would sit on its own.
+ *
+ * This is a layer on top of the content, not part of it: a video segment still
+ * letterboxes into the composition and a text segment still has its own x and
+ * y, and the transform moves and scales the result of that. Identity means
+ * "exactly where the content says", which is what a segment with no transform
+ * gets.
+ */
+export type Transform = {
+  /** Multiplier about the centre of what is being drawn. */
+  scale: number
+  /** Offset in composition pixels. */
+  x: number
+  y: number
+  /** 0 is invisible, 1 is solid. */
+  opacity: number
+}
+
+export const IDENTITY_TRANSFORM: Transform = {
+  scale: 1,
+  x: 0,
+  y: 0,
+  opacity: 1,
+}
+
+/**
+ * Every scalar a keyframe may animate.
+ *
+ * Deliberately NOT `keyof Transform`. Volume is not a transform - it changes
+ * nothing about where a segment is drawn - but it animates by exactly the same
+ * rules, on the same clock, through the same UI. Keeping one list of animatable
+ * properties is what stops each new one arriving as its own special case with
+ * its own storage, its own clamping and its own keyframe button.
+ */
+export type AnimatableProperty = 'scale' | 'x' | 'y' | 'opacity' | 'volume'
+
+export const ANIMATABLE_PROPERTIES: AnimatableProperty[] = [
+  'scale',
+  'x',
+  'y',
+  'opacity',
+  'volume',
+]
+
+/** The properties that place a segment on screen. */
+export const TRANSFORM_PROPERTIES: AnimatableProperty[] = [
+  'scale',
+  'x',
+  'y',
+  'opacity',
+]
+
+/** What each property is when nobody has said otherwise. */
+export const PROPERTY_DEFAULTS: Record<AnimatableProperty, number> = {
+  scale: 1,
+  x: 0,
+  y: 0,
+  opacity: 1,
+  volume: 1,
+}
+
+/** What each property is allowed to be. */
+export const PROPERTY_RANGES: Record<
+  AnimatableProperty,
+  { min: number; max: number }
+> = {
+  scale: { min: 0.01, max: 100 },
+  x: { min: -100_000, max: 100_000 },
+  y: { min: -100_000, max: 100_000 },
+  opacity: { min: 0, max: 1 },
+  // Above 1 is a boost. Four is loud enough to be useful and low enough that
+  // a slip of the finger does not blow the mix apart.
+  volume: { min: 0, max: 4 },
+}
+
+/**
+ * Keeps a property inside what it can mean.
+ *
+ * Clamped at the edit rather than guarded at every read, so nothing downstream
+ * has to wonder whether an opacity of 4 or a negative scale is possible.
+ */
+export function clampProperty(
+  property: AnimatableProperty,
+  value: number,
+): number {
+  const range = PROPERTY_RANGES[property]
+  if (!range) throw new Error(`Unknown property ${property}.`)
+  if (!Number.isFinite(value)) {
+    throw new Error(`${property} must be a finite number.`)
+  }
+  return Math.min(range.max, Math.max(range.min, value))
+}
+
+/**
+ * One point on a property's curve.
+ *
+ * The time is an offset from the segment's own head, not an absolute timeline
+ * position, so moving or trimming a segment carries its animation with it
+ * instead of leaving it behind.
+ */
+export type Keyframe = {
+  offsetMicros: number
+  value: number
+}
+
+/** Animated properties, by name. Absent means the static value is used. */
+export type Keyframes = Partial<Record<AnimatableProperty, Keyframe[]>>
+
+/**
+ * The effects a segment can carry.
+ *
+ * Deliberately a closed list rather than a plugin interface. CapCut loads
+ * effects as OpenFX plugins because it has to ship hundreds of them written by
+ * other people; here the value of the idea is the UNIFORM CONTRACT, not the
+ * dynamic loading - every effect is one named kind with one amount, applied in
+ * order inside the one render function, so nothing can apply an effect in the
+ * preview that the export does not.
+ */
+export type EffectKind =
+  | 'brightness'
+  | 'contrast'
+  | 'saturate'
+  | 'grayscale'
+  | 'blur'
+
+/**
+ * What each kind means: the amount that changes nothing, the range it is
+ * allowed, and how it is written as a filter function.
+ *
+ * The neutral value matters as much as the range: an effect sitting at neutral
+ * has to render identically to no effect at all, which is what lets one be
+ * added without the picture jumping.
+ */
+export const EFFECT_KINDS: Record<
+  EffectKind,
+  { neutral: number; min: number; max: number; unit: string; step: number }
+> = {
+  brightness: { neutral: 1, min: 0, max: 3, unit: '', step: 0.05 },
+  contrast: { neutral: 1, min: 0, max: 3, unit: '', step: 0.05 },
+  saturate: { neutral: 1, min: 0, max: 3, unit: '', step: 0.05 },
+  grayscale: { neutral: 0, min: 0, max: 1, unit: '', step: 0.05 },
+  blur: { neutral: 0, min: 0, max: 64, unit: 'px', step: 1 },
+}
+
+export type Effect = {
+  id: string
+  kind: EffectKind
+  amount: number
+  /**
+   * Animates `amount`. Offsets are from the segment head, exactly like a
+   * transform curve, so the two behave the same way under a move or a trim.
+   */
+  keyframes?: Keyframe[]
+}
+
+/**
+ * A blend from the segment before this one into this one.
+ *
+ * Stored on the INCOMING segment, because that is the one it belongs to: it
+ * survives the outgoing segment being replaced, and there is exactly one
+ * answer to which transition applies at a boundary.
+ *
+ * A transition costs time. Two clips cannot dissolve into one another without
+ * both being on screen at once, and the material for that has to come from
+ * somewhere - so applying one slides the incoming segment (and everything
+ * after it) earlier by its duration, exactly as it does in CapCut, and the
+ * project gets that much shorter. The two segments then overlap by exactly the
+ * transition's length, which is the ONLY overlap a packed row allows.
+ */
+export type TransitionKind = 'crossfade' | 'dip-to-black' | 'wipe'
+
+export const TRANSITION_KINDS: TransitionKind[] = [
+  'crossfade',
+  'dip-to-black',
+  'wipe',
+]
+
+/** How long a transition lasts unless someone says otherwise. */
+export const DEFAULT_TRANSITION_MICROS = 500_000
+
+export type Transition = {
+  kind: TransitionKind
   durationMicros: number
 }
 
-/** Clips are always sorted by timelineStartMicros and never overlap. */
-export type VideoTrack = {
-  clips: Clip[]
+/**
+ * How a segment is combined with whatever is already beneath it.
+ *
+ * These are the CSS blend modes, which the canvas implements directly - so
+ * this is a name for something the renderer can already do rather than
+ * anything that has to be computed here. 'normal' is ordinary stacking.
+ */
+export type BlendMode =
+  | 'normal'
+  | 'multiply'
+  | 'screen'
+  | 'overlay'
+  | 'darken'
+  | 'lighten'
+  | 'color-dodge'
+  | 'color-burn'
+  | 'hard-light'
+  | 'soft-light'
+  | 'difference'
+  | 'exclusion'
+  | 'hue'
+  | 'saturation'
+  | 'color'
+  | 'luminosity'
+
+export const BLEND_MODES: BlendMode[] = [
+  'normal',
+  'multiply',
+  'screen',
+  'overlay',
+  'darken',
+  'lighten',
+  'color-dodge',
+  'color-burn',
+  'hard-light',
+  'soft-light',
+  'difference',
+  'exclusion',
+  'hue',
+  'saturation',
+  'color',
+  'luminosity',
+]
+
+/**
+ * Which colour is being removed from a segment, and how forgivingly.
+ *
+ * Sits beside the mask rather than among the effects, because it answers the
+ * same question a mask does - which parts of this segment are there at all -
+ * and because an effect here carries a single amount, not four settings and a
+ * colour.
+ */
+export type ChromaKey = {
+  color: string
+  /** How close a pixel's colour must be to count as the key. */
+  similarity: number
+  /** How wide the band between kept and removed is. */
+  smoothness: number
+  /** How much key colour to drain out of what survives. */
+  spill: number
+}
+
+/** A green screen, and settings that key a decently lit one out of the box. */
+export const DEFAULT_CHROMA_KEY: ChromaKey = {
+  color: '#00b140',
+  similarity: 0.4,
+  smoothness: 0.08,
+  spill: 0.5,
+}
+
+export type MaskShape = 'rectangle' | 'ellipse'
+
+export const MASK_SHAPES: MaskShape[] = ['rectangle', 'ellipse']
+
+/**
+ * The part of a segment that is kept.
+ *
+ * Measured in COMPOSITION pixels rather than in the segment's own, so a mask
+ * stays where it was put when the footage behind it is swapped for something
+ * of another shape. `featherPx` softens the edge; `inverted` keeps the outside
+ * instead, which is how you cut a hole in something.
+ */
+export type Mask = {
+  shape: MaskShape
+  /** Centre of the shape. */
+  x: number
+  y: number
+  width: number
+  height: number
+  featherPx: number
+  inverted: boolean
+}
+
+/** One item placed on a track. */
+export type Segment = {
+  id: string
+  /** Where the segment's head sits on the timeline. */
+  timelineStartMicros: number
+  content: SegmentContent
+  /** Fixed values. Missing ones fall back to PROPERTY_DEFAULTS. */
+  properties?: Partial<Record<AnimatableProperty, number>>
+  /** Animation, which overrides the fixed value for the named properties. */
+  keyframes?: Keyframes
+  /** Applied in order, innermost first, when the segment is drawn. */
+  effects?: Effect[]
+  /** A blend from the previous segment on the same row into this one. */
+  transitionIn?: Transition
+  /** How this segment combines with what is under it. Absent means normal. */
+  blendMode?: BlendMode
+  /** Limits where this segment draws. Absent means all of it. */
+  mask?: Mask
+  /** Removes a colour from the picture. Absent means keep all of it. */
+  chromaKey?: ChromaKey
+  /**
+   * How fast the source plays. 1 is as recorded, 2 twice as fast.
+   *
+   * Deliberately NOT one of the animatable properties. Those are values read
+   * AT a time; this one defines what time even means for the segment, so a
+   * keyframe on it would be circular - you would need the rate to know where
+   * on the curve to look. Speed ramps need the integral of a rate curve and
+   * are a different feature; this is a constant.
+   */
+  rate?: number
+}
+
+/**
+ * The rates a segment may play at.
+ *
+ * Bounded by the resampling trick the mixer uses rather than by taste: audio
+ * is sped up by reporting its buffer at a multiplied sample rate and letting
+ * the audio graph resample it, and a Web Audio buffer's rate has to stay
+ * inside what the platform accepts. Four times a 48kHz source is 192kHz, well
+ * inside it; forty times would not be.
+ */
+export const MIN_RATE = 0.25
+export const MAX_RATE = 4
+
+/** How fast a segment plays. */
+export function segmentRate(segment: Segment): number {
+  const rate = segment.rate
+  return rate === undefined || !Number.isFinite(rate) ? 1 : rate
+}
+
+/** Keeps a rate inside what the mixer can actually play. */
+export function clampRate(rate: number): number {
+  if (!Number.isFinite(rate)) {
+    throw new Error('A rate must be a finite number.')
+  }
+  return Math.min(MAX_RATE, Math.max(MIN_RATE, rate))
+}
+
+/**
+ * Where in its source a segment is at a moment on the timeline.
+ *
+ * The one place the rate turns timeline time into source time. Everything that
+ * needs to know which frame or which sample to fetch goes through here, so
+ * there is a single answer and the decoder and the renderer cannot disagree
+ * about it.
+ */
+export function sourceMicrosAt(
+  segment: Segment,
+  timelineMicros: number,
+): number {
+  const content = segment.content
+  if (content.kind === 'text') return 0
+
+  return (
+    content.sourceInMicros +
+    Math.round((timelineMicros - segment.timelineStartMicros) * segmentRate(segment))
+  )
+}
+
+/** How much source a stretch of timeline consumes at a segment's rate. */
+export function sourceSpanFor(
+  segment: Segment,
+  timelineSpanMicros: number,
+): number {
+  return Math.round(timelineSpanMicros * segmentRate(segment))
+}
+
+/** How much timeline a stretch of source fills at a segment's rate. */
+export function timelineSpanFor(
+  segment: Segment,
+  sourceSpanMicros: number,
+): number {
+  return Math.round(sourceSpanMicros / segmentRate(segment))
+}
+
+/**
+ * A row of the timeline.
+ *
+ * `kind` decides both what may be dropped on the row and whether its segments
+ * are allowed to overlap. Video is a single picture at any instant, so a video
+ * track packs its segments end to end; two captions at once is an ordinary
+ * thing to want, so a text track lets them sit on top of one another.
+ */
+export type TrackKind = 'video' | 'text' | 'audio'
+
+export type Track = {
+  id: string
+  kind: TrackKind
+  /** Always sorted by timelineStartMicros. */
+  segments: Segment[]
 }
 
 /**
@@ -66,46 +523,523 @@ export type Composition = {
   height: number
 }
 
+/**
+ * How hard the encoder tries. These map onto mediabunny's own presets rather
+ * than to bitrates, because the sensible bitrate for a frame depends on its
+ * size and the codec, and the encoder knows both.
+ */
+export type ExportQuality = 'low' | 'medium' | 'high' | 'very-high'
+
+export const EXPORT_QUALITIES: ExportQuality[] = [
+  'low',
+  'medium',
+  'high',
+  'very-high',
+]
+
+/**
+ * What the exported file should be, as distinct from what the project is
+ * authored at.
+ *
+ * The composition is the canvas you edit against; this is the file that comes
+ * out of it. They are usually the same and do not have to be: cutting 4K
+ * footage and delivering 1080p is ordinary, and so is the reverse.
+ */
+export type ExportSettings = {
+  /**
+   * Target height in pixels. Null keeps the composition's own size, which is
+   * what a project gets until someone says otherwise.
+   */
+  heightPx: number | null
+  quality: ExportQuality
+}
+
+export const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
+  heightPx: null,
+  quality: 'high',
+}
+
+/** The heights offered in the UI. Width follows the composition's shape. */
+export const EXPORT_HEIGHTS = [480, 720, 1080, 1440, 2160]
+
 export type Project = {
   composition: Composition
   sources: Record<string, Source>
-  videoTrack: VideoTrack
-  /** Sorted by timelineStartMicros. May overlap one another. */
-  overlays: Overlay[]
+  /** Bottom of the stack first. Later tracks draw over earlier ones. */
+  tracks: Track[]
+  /** Absent until someone changes it, which means the defaults. */
+  exportSettings?: ExportSettings
 }
 
-/** The shortest clip the model allows. Zero and negative durations are invalid. */
-export const MIN_CLIP_MICROS = 1
+/** The shortest segment the model allows. Zero and negative durations are invalid. */
+export const MIN_SEGMENT_MICROS = 1
 
-/** Likewise for an overlay. */
-export const MIN_OVERLAY_MICROS = 1
-
-/** The one font. No picker: this is not a typesetting program. */
+/** What a caption uses when it has not been told otherwise. */
 export const OVERLAY_FONT_FAMILY = 'sans-serif'
+
+/**
+ * The CSS font string for a caption.
+ *
+ * One place, so the measuring and the drawing cannot disagree about what is
+ * being laid out - which would put a background box in the wrong place.
+ */
+export function fontStringFor(text: TextContent): string {
+  const style = text.italic ? 'italic ' : ''
+  const weight = text.bold ? 'bold ' : ''
+  const family = text.fontFamily ?? OVERLAY_FONT_FAMILY
+
+  return `${style}${weight}${text.sizePx}px ${family}`
+}
+
+/** The lines of a caption. A caption is usually more than one. */
+export function textLines(text: TextContent): string[] {
+  return text.content.split('\n')
+}
 
 /** Used until a source arrives to default it. */
 export const DEFAULT_COMPOSITION: Composition = { width: 1920, height: 1080 }
 
+/** Ids of the three tracks every new project starts with. */
+export const MAIN_AUDIO_TRACK_ID = 'audio-1'
+export const MAIN_VIDEO_TRACK_ID = 'video-1'
+export const MAIN_TEXT_TRACK_ID = 'text-1'
+
+/**
+ * A new project already has one row of each kind. An editor with no rows has
+ * nowhere to drop anything, and every project needs all three eventually.
+ *
+ * The audio row is at the bottom of the stack. Nothing is drawn from it, so
+ * where it sits changes no pixels - but the timeline draws the stack top down,
+ * so this is what puts sound under the picture and captions over it, which is
+ * where everyone expects to find them.
+ */
 export function emptyProject(): Project {
   return {
     composition: { ...DEFAULT_COMPOSITION },
     sources: {},
-    videoTrack: { clips: [] },
-    overlays: [],
+    tracks: [
+      { id: MAIN_AUDIO_TRACK_ID, kind: 'audio', segments: [] },
+      { id: MAIN_VIDEO_TRACK_ID, kind: 'video', segments: [] },
+      { id: MAIN_TEXT_TRACK_ID, kind: 'text', segments: [] },
+    ],
   }
 }
 
-/** Duration is derived from the source in/out points, never stored. */
-export function clipDuration(clip: Clip): number {
-  return clip.sourceOutMicros - clip.sourceInMicros
+/** A project's export settings, with the defaults filled in. */
+export function exportSettingsOf(project: Project): ExportSettings {
+  return { ...DEFAULT_EXPORT_SETTINGS, ...project.exportSettings }
 }
 
-/** Exclusive end of the clip on the timeline. */
-export function clipEndMicros(clip: Clip): number {
-  return clip.timelineStartMicros + clipDuration(clip)
+/**
+ * The size the exported file is written at.
+ *
+ * The chosen height drives it and the width follows the composition's shape,
+ * so changing the export size can never change the framing. Both come back
+ * EVEN: every codec that matters wants even dimensions, and an odd one is
+ * either rejected outright or quietly rounded somewhere less visible.
+ */
+export function exportDimensions(
+  composition: Composition,
+  settings: ExportSettings,
+): Composition {
+  const even = (value: number) => Math.max(2, Math.round(value / 2) * 2)
+
+  if (settings.heightPx === null) {
+    return { width: even(composition.width), height: even(composition.height) }
+  }
+
+  const height = even(settings.heightPx)
+  const width = even((composition.width * height) / composition.height)
+
+  return { width, height }
 }
 
-/** Exclusive end of an overlay on the timeline. */
-export function overlayEndMicros(overlay: Overlay): number {
-  return overlay.timelineStartMicros + overlay.durationMicros
+/**
+ * Whether segments on a track of this kind may sit on top of one another.
+ *
+ * Only text. A video row shows one picture at a time and an audio row plays
+ * one thing at a time; two of either at once means two rows, which is both
+ * what CapCut does and what makes the trim rules mean something.
+ */
+export function trackAllowsOverlap(kind: TrackKind): boolean {
+  return kind === 'text'
+}
+
+/**
+ * How long a segment runs on the timeline.
+ *
+ * Still derived, never stored: the source range and the rate together imply
+ * it. Only text stores a duration, because it has no source to derive one
+ * from.
+ */
+export function segmentDuration(segment: Segment): number {
+  const content = segment.content
+  if (content.kind === 'text') return content.durationMicros
+
+  // Not clamped to a minimum: this reports what the range and the rate
+  // actually come to, and a segment too short to exist has to be visible as
+  // such or the checks that reject one have nothing to see.
+  return Math.round(
+    (content.sourceOutMicros - content.sourceInMicros) / segmentRate(segment),
+  )
+}
+
+/** Exclusive end of a segment on the timeline. */
+export function segmentEndMicros(segment: Segment): number {
+  return segment.timelineStartMicros + segmentDuration(segment)
+}
+
+/**
+ * The stretch of timeline a segment's incoming transition covers: its first
+ * `durationMicros`, during which the segment before it is still on screen.
+ */
+export function transitionWindow(
+  segment: Segment,
+): { startMicros: number; endMicros: number } | null {
+  const transition = segment.transitionIn
+  if (!transition || transition.durationMicros <= 0) return null
+
+  return {
+    startMicros: segment.timelineStartMicros,
+    endMicros: segment.timelineStartMicros + transition.durationMicros,
+  }
+}
+
+/** How far through its transition a segment is, from 0 at the start to 1. */
+export function transitionProgress(
+  segment: Segment,
+  timelineMicros: number,
+): number | null {
+  const window = transitionWindow(segment)
+  if (!window) return null
+  if (timelineMicros < window.startMicros) return null
+  if (timelineMicros >= window.endMicros) return null
+
+  const span = window.endMicros - window.startMicros
+  return (timelineMicros - window.startMicros) / span
+}
+
+/**
+ * How opaque each side of a transition is, part way through it.
+ *
+ * A crossfade draws the outgoing side solid and the incoming over it at the
+ * progress, because alpha compositing of `in` at p over `out` IS
+ * `in*p + out*(1-p)` - the dissolve comes out of the maths rather than being
+ * computed separately. A dip goes out through black and back, so both sides
+ * are partly transparent over the cleared composition and neither is visible
+ * at the midpoint. A wipe does not fade at all; it is handled by clipping, so
+ * both sides stay solid.
+ */
+export function transitionAlphas(
+  kind: TransitionKind,
+  progress: number,
+): { outgoing: number; incoming: number } {
+  switch (kind) {
+    case 'crossfade':
+      return { outgoing: 1, incoming: progress }
+    case 'dip-to-black':
+      return {
+        outgoing: Math.max(0, 1 - progress * 2),
+        incoming: Math.max(0, progress * 2 - 1),
+      }
+    case 'wipe':
+      return { outgoing: 1, incoming: 1 }
+  }
+}
+
+/** Whether a segment covers `timelineMicros`. The tail is exclusive. */
+export function segmentCovers(
+  segment: Segment,
+  timelineMicros: number,
+): boolean {
+  return (
+    segment.timelineStartMicros <= timelineMicros &&
+    timelineMicros < segmentEndMicros(segment)
+  )
+}
+
+/**
+ * A property's value at `offsetMicros`, interpolated linearly between the
+ * keyframes either side of it.
+ *
+ * Outside the outermost keyframes the nearest one is held rather than
+ * extrapolated: a curve that ran off to infinity before its first point is
+ * never what anyone meant. An empty list means there is no animation, so the
+ * static value stands.
+ */
+export function valueAt(
+  keyframes: readonly Keyframe[],
+  offsetMicros: number,
+  fallback: number,
+): number {
+  if (keyframes.length === 0) return fallback
+
+  const first = keyframes[0]!
+  if (offsetMicros <= first.offsetMicros) return first.value
+
+  const last = keyframes[keyframes.length - 1]!
+  if (offsetMicros >= last.offsetMicros) return last.value
+
+  for (let i = 1; i < keyframes.length; i++) {
+    const after = keyframes[i]!
+    if (after.offsetMicros < offsetMicros) continue
+
+    const before = keyframes[i - 1]!
+    const span = after.offsetMicros - before.offsetMicros
+    if (span <= 0) return after.value
+
+    const t = (offsetMicros - before.offsetMicros) / span
+    return before.value + (after.value - before.value) * t
+  }
+
+  return last.value
+}
+
+/**
+ * How a segment should be drawn at a moment on the TIMELINE.
+ *
+ * Resolved rather than stored, like a segment's duration: the keyframes are
+ * the truth and this is what they come out as. Both the preview and the export
+ * call this from inside the one render function, so an animation cannot play
+ * differently in the two.
+ */
+export function propertyAt(
+  segment: Segment,
+  property: AnimatableProperty,
+  timelineMicros: number,
+): number {
+  const base = segment.properties?.[property] ?? PROPERTY_DEFAULTS[property]
+  const curve = segment.keyframes?.[property]
+  if (!curve || curve.length === 0) return base
+
+  return clampProperty(
+    property,
+    valueAt(curve, timelineMicros - segment.timelineStartMicros, base),
+  )
+}
+
+export function transformAt(
+  segment: Segment,
+  timelineMicros: number,
+): Transform {
+  return {
+    scale: propertyAt(segment, 'scale', timelineMicros),
+    x: propertyAt(segment, 'x', timelineMicros),
+    y: propertyAt(segment, 'y', timelineMicros),
+    opacity: propertyAt(segment, 'opacity', timelineMicros),
+  }
+}
+
+/**
+ * How loud a segment is at a moment, as a multiplier on its samples.
+ *
+ * Applied to the PCM as it comes out of the decoder rather than to a node in
+ * the graph, so live playback and the offline export mix are scaled by the
+ * same arithmetic instead of by two different mechanisms that have to agree.
+ */
+export function volumeAt(segment: Segment, timelineMicros: number): number {
+  return propertyAt(segment, 'volume', timelineMicros)
+}
+
+/** Keeps an effect amount inside what its kind allows. */
+export function clampEffectAmount(kind: EffectKind, amount: number): number {
+  const spec = EFFECT_KINDS[kind]
+  if (!spec) throw new Error(`Unknown effect kind ${kind}.`)
+  if (!Number.isFinite(amount)) {
+    throw new Error('An effect amount must be a finite number.')
+  }
+  return Math.min(spec.max, Math.max(spec.min, amount))
+}
+
+/** An effect's amount at a moment, animated or not. */
+export function effectAmountAt(effect: Effect, offsetMicros: number): number {
+  return clampEffectAmount(
+    effect.kind,
+    valueAt(effect.keyframes ?? [], offsetMicros, effect.amount),
+  )
+}
+
+/**
+ * The effects of a segment as one canvas filter string, or 'none'.
+ *
+ * A segment with no effects, and one whose effects all sit at neutral, both
+ * come out as 'none' - so adding an effect and leaving it alone cannot change
+ * a single pixel, and the golden-frame comparison stays meaningful.
+ */
+export function filterFor(
+  effects: readonly Effect[] | undefined,
+  offsetMicros: number,
+): string {
+  if (!effects || effects.length === 0) return 'none'
+
+  const parts: string[] = []
+  for (const effect of effects) {
+    const spec = EFFECT_KINDS[effect.kind]
+    if (!spec) continue
+
+    const amount = effectAmountAt(effect, offsetMicros)
+    if (amount === spec.neutral) continue
+
+    parts.push(`${effect.kind}(${round(amount)}${spec.unit})`)
+  }
+
+  return parts.length > 0 ? parts.join(' ') : 'none'
+}
+
+/** Trims float noise out of a filter string so it stays stable and readable. */
+function round(value: number): number {
+  return Math.round(value * 1000) / 1000
+}
+
+/** Whether one property of a segment is animated. */
+export function isPropertyAnimated(
+  segment: Segment,
+  property: AnimatableProperty,
+): boolean {
+  return (segment.keyframes?.[property]?.length ?? 0) > 0
+}
+
+/** Whether a property has a keyframe at exactly this offset from the head. */
+export function hasKeyframeAt(
+  segment: Segment,
+  property: AnimatableProperty,
+  offsetMicros: number,
+): boolean {
+  return (segment.keyframes?.[property] ?? []).some(
+    (keyframe) => keyframe.offsetMicros === offsetMicros,
+  )
+}
+
+/** Whether a segment is animated at all. */
+export function isAnimated(segment: Segment): boolean {
+  const keyframes = segment.keyframes
+  if (!keyframes) return false
+  return ANIMATABLE_PROPERTIES.some(
+    (property) => (keyframes[property]?.length ?? 0) > 0,
+  )
+}
+
+/**
+ * Whether a segment covers the composition completely and opaquely, so
+ * anything under it is hidden.
+ *
+ * Only a video segment can, and only an untransformed one: the moment it is
+ * scaled, moved or faded, what is beneath shows through and has to be drawn.
+ * A source that letterboxes leaves bars, which are part of the composition
+ * rather than a hole - but they are black, and so is what a hidden row would
+ * be drawn onto, so an occlusion test that ignores them would be wrong. Hence
+ * the size check.
+ */
+export function occludesEverything(
+  segment: Segment,
+  composition: Composition,
+  sources: Record<string, Source>,
+  timelineMicros: number,
+): boolean {
+  const content = videoContent(segment)
+  if (!content) return false
+
+  // A blend mode is a function OF what is underneath, and a mask leaves parts
+  // of it showing. Either way the row below has to be drawn, so neither can
+  // ever be treated as hiding it.
+  if (segment.blendMode !== undefined && segment.blendMode !== 'normal') {
+    return false
+  }
+  if (segment.mask) return false
+  // A key makes part of the picture transparent, so what is under it shows.
+  if (segment.chromaKey) return false
+
+  const transform = transformAt(segment, timelineMicros)
+  if (transform.opacity < 1 || transform.scale < 1) return false
+  if (transform.x !== 0 || transform.y !== 0) return false
+
+  const source = sources[content.sourceId]
+  if (!source) return false
+
+  // Same aspect ratio means no letterbox bars, so the picture fills the frame.
+  return (
+    source.width * composition.height === source.height * composition.width
+  )
+}
+
+/**
+ * Whether a source has a picture at all.
+ *
+ * A file with only sound is stored with a width and height of zero, which is
+ * the honest answer to how big its picture is.
+ */
+export function sourceHasVideo(source: Source): boolean {
+  return source.width > 0 && source.height > 0
+}
+
+/** Narrows a segment to a video one, or undefined if it is anything else. */
+export function videoContent(segment: Segment): VideoContent | undefined {
+  return segment.content.kind === 'video' ? segment.content : undefined
+}
+
+/** Narrows a segment to an audio one, or undefined if it is anything else. */
+export function audioContent(segment: Segment): AudioContent | undefined {
+  return segment.content.kind === 'audio' ? segment.content : undefined
+}
+
+/**
+ * The source window of anything that makes a sound.
+ *
+ * A video segment carries its own audio, so it counts: muting a clip and
+ * lowering a piece of music are the same operation on the same kind of thing.
+ */
+export function soundContent(segment: Segment): SoundContent | undefined {
+  const content = segment.content
+  return content.kind === 'text' ? undefined : content
+}
+
+/** Narrows a segment to a text one, or undefined if it is video. */
+/**
+ * What a segment is CALLED: the file it plays, or the words it draws.
+ *
+ * One answer, because two things name the same segment - the block on the
+ * timeline and the action strip above it - and a strip that worked its own
+ * name out could call a clip something the block does not.
+ */
+export function segmentLabel(project: Project, segment: Segment): string {
+  const text = textContent(segment)
+  if (text) return text.content
+
+  const content = segment.content
+  if (content.kind === 'text') return segment.id
+  return project.sources[content.sourceId]?.name ?? content.sourceId
+}
+
+export function textContent(segment: Segment): TextContent | undefined {
+  return segment.content.kind === 'text' ? segment.content : undefined
+}
+
+/** Every segment in the project, with the track it sits on. Bottom track first. */
+export function allSegments(
+  project: Project,
+): { track: Track; segment: Segment }[] {
+  return project.tracks.flatMap((track) =>
+    track.segments.map((segment) => ({ track, segment })),
+  )
+}
+
+/** Finds a segment anywhere in the project. */
+export function findSegment(
+  project: Project,
+  segmentId: string,
+): { track: Track; segment: Segment; index: number } | undefined {
+  for (const track of project.tracks) {
+    const index = track.segments.findIndex(
+      (segment) => segment.id === segmentId,
+    )
+    if (index >= 0) {
+      return { track, segment: track.segments[index]!, index }
+    }
+  }
+  return undefined
+}
+
+/** The track a segment sits on, or undefined if there is no such segment. */
+export function trackOf(project: Project, segmentId: string): Track | undefined {
+  return findSegment(project, segmentId)?.track
 }

@@ -9,33 +9,48 @@ import {
   zoomAround,
   ZOOM_STEP,
 } from '../timeline/layout'
-import {
-  clipZoneAt,
-  type DragMode,
-  type DragTarget,
-} from '../timeline/dragging'
+import { segmentZoneAt, type DragMode } from '../timeline/dragging'
+import Waveform from './Waveform'
 import { timelineDuration } from '../timeline/operations'
-import { clipDuration, type Project } from '../timeline/types'
+import {
+  segmentDuration,
+  segmentLabel,
+  soundContent,
+  transitionWindow,
+  type Project,
+  type Track,
+} from '../timeline/types'
+
+/** A measured waveform, by the source it belongs to. */
+export type PeaksBySource = Record<
+  string,
+  { peaks: Float32Array; bucketsPerSecond: number }
+>
+
+/** How tall a waveform is drawn inside its block. */
+const WAVEFORM_HEIGHT = 22
 
 export type TimelineProps = {
   project: Project
   /** Playhead position, in timeline microseconds. */
   currentMicros: number
   onSeek: (timelineMicros: number) => void
-  onClipGrab: (
-    itemId: string,
+  onSegmentGrab: (
+    segmentId: string,
     mode: DragMode,
     clientX: number,
-    target: DragTarget,
+    trackId: string,
   ) => void
-  /** Which clip or overlay is selected, if any. */
+  /** Which segment is selected, if any. */
   selectedId?: string | null
-  onSelect?: (id: string | null, target: DragTarget) => void
+  onSelect?: (segmentId: string | null) => void
   /** The playhead head was grabbed, to scrub. */
   onPlayheadGrab?: (clientX: number) => void
   pixelsPerSecond?: number
   /** Reports a zoom the timeline initiated, e.g. ctrl+wheel. */
   onZoom?: (pixelsPerSecond: number) => void | undefined
+  /** Waveforms for whichever sources have been measured so far. */
+  peaks?: PeaksBySource
 }
 
 const CURSOR_FOR: Record<DragMode, string> = {
@@ -44,23 +59,42 @@ const CURSOR_FOR: Record<DragMode, string> = {
   move: 'move',
 }
 
-/** The video track: a ruler, clip blocks, and a playhead. */
+/**
+ * The test id a block carries.
+ *
+ * Each kind keeps the name it had when it was its own type: what a user sees
+ * on the row has not changed, only how the model stores it.
+ */
+const TESTID_FOR: Record<string, string> = {
+  video: 'clip',
+  text: 'overlay-block',
+  audio: 'audio-block',
+}
+
+/**
+ * The timeline: a ruler, one row per track, and a playhead.
+ *
+ * Rows are drawn top of the stack first, so a track that draws over another in
+ * the composition also sits above it here.
+ */
 export default function Timeline({
   project,
   currentMicros,
   onSeek,
-  onClipGrab,
+  onSegmentGrab,
   pixelsPerSecond = DEFAULT_PIXELS_PER_SECOND,
   onZoom = () => {},
   selectedId = null,
   onSelect = () => {},
   onPlayheadGrab = () => {},
+  peaks = {},
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const duration = timelineDuration(project)
   const width = trackWidth(duration, pixelsPerSecond)
   const ticks = rulerTicks(duration, pixelsPerSecond)
+  const rows: Track[] = [...project.tracks].reverse()
 
   // Wheel zoom is bound by hand rather than via onWheel, because React attaches
   // wheel listeners passively and a passive listener cannot preventDefault -
@@ -80,8 +114,7 @@ export default function Timeline({
       const next = zoomAround({
         pixelsPerSecond,
         scrollLeft: strip.scrollLeft,
-        cursorOffsetPixels:
-          event.clientX - strip.getBoundingClientRect().left,
+        cursorOffsetPixels: event.clientX - strip.getBoundingClientRect().left,
         factor,
       })
 
@@ -101,7 +134,7 @@ export default function Timeline({
 
   function zoneFor(event: MouseEvent<HTMLDivElement>): DragMode {
     const bounds = event.currentTarget.getBoundingClientRect()
-    return clipZoneAt(event.clientX - bounds.left, bounds.width)
+    return segmentZoneAt(event.clientX - bounds.left, bounds.width)
   }
 
   return (
@@ -124,67 +157,110 @@ export default function Timeline({
           ))}
         </div>
 
-        <div className="timeline-track">
-          {project.videoTrack.clips.map((clip) => (
-            <div
-              key={clip.id}
-              className="timeline-clip"
-              data-testid="clip"
-              data-clip-id={clip.id}
-              style={{
-                left: microsToPixels(clip.timelineStartMicros, pixelsPerSecond),
-                width: microsToPixels(clipDuration(clip), pixelsPerSecond),
-              }}
-              // Set directly rather than through state: the cursor has to
-              // track the pointer, and re-rendering the timeline on every
-              // mousemove to change one style is not worth it.
-              onMouseMove={(event) => {
-                event.currentTarget.style.cursor = CURSOR_FOR[zoneFor(event)]
-              }}
-              onMouseDown={(event) => {
-                event.preventDefault()
-                onSelect(clip.id, 'clip')
-                onClipGrab(clip.id, zoneFor(event), event.clientX, 'clip')
-              }}
-            >
-              <span className="timeline-clip-label">
-                {project.sources[clip.sourceId]?.name ?? clip.sourceId}
-              </span>
-            </div>
-          ))}
-        </div>
+        {rows.map((track) => (
+          <div
+            key={track.id}
+            className={`timeline-track timeline-track-${track.kind}`}
+            data-testid="track"
+            data-track-id={track.id}
+            data-track-kind={track.kind}
+          >
+            {/* Which row this is, pinned to the left of the strip so it stays
+                put while the timeline scrolls under it. */}
+            <span className="timeline-track-label" data-testid="track-label">
+              {track.kind}
+            </span>
+            {track.segments.map((segment) => {
+              const selected = segment.id === selectedId
+              const classes = ['timeline-clip']
+              if (track.kind === 'text') classes.push('timeline-overlay')
+              if (track.kind === 'audio') classes.push('timeline-audio')
+              if (selected) classes.push('is-selected')
 
-        <div className="timeline-track timeline-overlays">
-          {project.overlays.map((overlay) => (
-            <div
-              key={overlay.id}
-              className={
-                overlay.id === selectedId
-                  ? 'timeline-clip timeline-overlay is-selected'
-                  : 'timeline-clip timeline-overlay'
-              }
-              data-testid="overlay-block"
-              data-overlay-id={overlay.id}
-              style={{
-                left: microsToPixels(
-                  overlay.timelineStartMicros,
-                  pixelsPerSecond,
-                ),
-                width: microsToPixels(overlay.durationMicros, pixelsPerSecond),
-              }}
-              onMouseMove={(event) => {
-                event.currentTarget.style.cursor = CURSOR_FOR[zoneFor(event)]
-              }}
-              onMouseDown={(event) => {
-                event.preventDefault()
-                onSelect(overlay.id, 'overlay')
-                onClipGrab(overlay.id, zoneFor(event), event.clientX, 'overlay')
-              }}
-            >
-              <span className="timeline-clip-label">{overlay.content}</span>
-            </div>
-          ))}
-        </div>
+              return (
+                <div
+                  key={segment.id}
+                  className={classes.join(' ')}
+                  data-testid={TESTID_FOR[track.kind] ?? 'clip'}
+                  data-segment-id={segment.id}
+                  data-track-id={track.id}
+                  data-clip-id={track.kind === 'video' ? segment.id : undefined}
+                  data-overlay-id={
+                    track.kind === 'text' ? segment.id : undefined
+                  }
+                  style={{
+                    left: microsToPixels(
+                      segment.timelineStartMicros,
+                      pixelsPerSecond,
+                    ),
+                    width: microsToPixels(
+                      segmentDuration(segment),
+                      pixelsPerSecond,
+                    ),
+                  }}
+                  // Set directly rather than through state: the cursor has to
+                  // track the pointer, and re-rendering the timeline on every
+                  // mousemove to change one style is not worth it.
+                  onMouseMove={(event) => {
+                    event.currentTarget.style.cursor = CURSOR_FOR[zoneFor(event)]
+                  }}
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                    onSelect(segment.id)
+                    onSegmentGrab(
+                      segment.id,
+                      zoneFor(event),
+                      event.clientX,
+                      track.id,
+                    )
+                  }}
+                >
+                  {(() => {
+                    // A waveform, once the source it plays has been measured.
+                    const sound = soundContent(segment)
+                    const measured = sound ? peaks[sound.sourceId] : undefined
+                    if (!sound || !measured || measured.peaks.length === 0) {
+                      return null
+                    }
+
+                    return (
+                      <Waveform
+                        peaks={measured.peaks}
+                        bucketsPerSecond={measured.bucketsPerSecond}
+                        sourceInMicros={sound.sourceInMicros}
+                        sourceOutMicros={sound.sourceOutMicros}
+                        width={microsToPixels(
+                          segmentDuration(segment),
+                          pixelsPerSecond,
+                        )}
+                        height={WAVEFORM_HEIGHT}
+                      />
+                    )
+                  })()}
+
+                  {/* The stretch where this segment and the one before it
+                      are both on screen. */}
+                  {transitionWindow(segment) && (
+                    <span
+                      className="timeline-transition"
+                      data-testid="transition-marker"
+                      data-segment-id={segment.id}
+                      style={{
+                        width: microsToPixels(
+                          segment.transitionIn!.durationMicros,
+                          pixelsPerSecond,
+                        ),
+                      }}
+                    />
+                  )}
+                  <span className="timeline-clip-label">
+                    {segmentLabel(project, segment)}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        ))}
 
         <div
           className="timeline-playhead"

@@ -35,7 +35,7 @@ test.beforeEach(async ({ page }) => {
     throw error
   })
   await page.goto('/')
-  await page.setInputFiles('input[type=file]', FIXTURE.path)
+  await page.setInputFiles('[data-testid=media-input]', FIXTURE.path)
   await expect(page.getByTestId('clip')).toBeVisible()
 })
 
@@ -96,8 +96,8 @@ test('the canvas actually redraws when the track is clicked', async ({
 })
 
 test('the playhead tracks playback', async ({ page }) => {
-  await page.getByRole('button', { name: 'Play' }).click()
-  await expect(page.getByRole('button', { name: 'Pause' })).toBeEnabled()
+  await page.getByRole('button', { name: 'Play', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeEnabled()
 
   await expect
     .poll(async () => (await page.getByTestId('playhead').boundingBox())!.x, {
@@ -105,7 +105,7 @@ test('the playhead tracks playback', async ({ page }) => {
     })
     .toBeGreaterThan((await page.getByTestId('timeline').boundingBox())!.x + 50)
 
-  await page.getByRole('button', { name: 'Pause' }).click()
+  await page.getByRole('button', { name: 'Pause', exact: true }).click()
 })
 
 test('the playhead lands at the end when playback finishes', async ({
@@ -113,8 +113,8 @@ test('the playhead lands at the end when playback finishes', async ({
 }) => {
   // Clip ends are exclusive, so a finished player reports a source time no
   // clip contains. The playhead must land on the end, not snap back to zero.
-  await page.getByRole('button', { name: 'Play' }).click()
-  await expect(page.getByRole('button', { name: 'Play' })).toBeEnabled({
+  await page.getByRole('button', { name: 'Play', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled({
     timeout: 30_000,
   })
 

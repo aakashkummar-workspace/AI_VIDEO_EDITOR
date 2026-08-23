@@ -10,6 +10,9 @@ import {
   Mp4OutputFormat,
   Output,
   QUALITY_HIGH,
+  QUALITY_LOW,
+  QUALITY_MEDIUM,
+  QUALITY_VERY_HIGH,
   VideoSampleSink,
   getFirstEncodableAudioCodec,
   getFirstEncodableVideoCodec,
@@ -22,13 +25,40 @@ import {
   renderFrame,
   secondsToMicros,
   takeFrame,
+  type DecodedLayers,
 } from './playback'
-import { clipAt, timelineDuration } from './timeline/operations'
-import { clipEndMicros, type Project } from './timeline/types'
+import {
+  soundTracks,
+  timelineDuration,
+  videoTracks,
+  visibleVideoSegmentsAt,
+} from './timeline/operations'
+import {
+  exportDimensions,
+  exportSettingsOf,
+  isPropertyAnimated,
+  propertyAt,
+  segmentCovers,
+  segmentEndMicros,
+  segmentRate,
+  soundContent,
+  sourceMicrosAt,
+  timelineSpanFor,
+  transitionWindow,
+  videoContent,
+  volumeAt,
+  type ExportQuality,
+  type Project,
+  type Segment,
+  type Track,
+  type VideoContent,
+} from './timeline/types'
 import {
   AUDIO_BUFFER_MAX_CHUNKS,
   BUFFER_AHEAD_MICROS,
+  WAVEFORM_BUCKETS_PER_SECOND,
   BUFFER_MAX_FRAMES,
+  BUFFER_MAX_ITEMS,
   type AudioChunk,
   type MainToWorker,
   type SourceGeometry,
@@ -58,7 +88,8 @@ if (scope.name === 'instrumented') {
  */
 type OpenSource = {
   input: Input
-  track: InputVideoTrack
+  /** Null for a file that carries only sound, which is a normal thing to open. */
+  track: InputVideoTrack | null
   audioTrack: InputAudioTrack | null
   geometry: SourceGeometry
 }
@@ -79,8 +110,16 @@ let project: Project | null = null
 
 /** Bumped by the UI thread on every play/seek/stop; stale work is abandoned. */
 let generation = 0
-/** Timeline timestamps posted to the UI thread that it has not consumed. */
-let inFlight: number[] = []
+/**
+ * Render items posted to the UI thread that it has not consumed, and how many
+ * decoded frames each one is carrying.
+ *
+ * The frame count is not the item count: one item holds one frame per video
+ * row that has to be drawn, so a stack of rows puts several frames in flight
+ * per item. Counting items alone would let the real memory in flight grow with
+ * the number of rows while the cap looked unchanged.
+ */
+let inFlight: { timelineMicros: number; frames: number }[] = []
 let resumePump: (() => void) | null = null
 
 /** Audio chunks posted but not yet scheduled by the UI thread. */
@@ -99,12 +138,28 @@ function releasePump() {
   resume?.()
 }
 
-/** True while the UI thread has enough decoded ahead of the playhead. */
+/** Decoded frames the UI thread is holding, across every row. */
+function inFlightFrames(): number {
+  let total = 0
+  for (const item of inFlight) total += item.frames
+  return total
+}
+
+/**
+ * True while the UI thread has enough decoded ahead of the playhead.
+ *
+ * Three bounds, and the tightest wins: the frames in flight, the items in
+ * flight, and how far ahead of the playhead they reach. The item bound matters
+ * on its own because a run of gaps carries no frames at all and would
+ * otherwise never fill the buffer.
+ */
 function bufferIsFull(): boolean {
-  if (inFlight.length >= BUFFER_MAX_FRAMES) return true
+  if (inFlightFrames() >= BUFFER_MAX_FRAMES) return true
+  if (inFlight.length >= BUFFER_MAX_ITEMS) return true
   if (inFlight.length < 2) return false
 
-  const span = inFlight[inFlight.length - 1]! - inFlight[0]!
+  const span =
+    inFlight[inFlight.length - 1]!.timelineMicros - inFlight[0]!.timelineMicros
   return span >= BUFFER_AHEAD_MICROS
 }
 
@@ -123,10 +178,7 @@ async function openSource(sourceId: string): Promise<OpenSource> {
   })
 
   const track = await input.getPrimaryVideoTrack()
-  if (!track) {
-    throw new Error(`Source ${file.name} has no video track.`)
-  }
-  if (!(await track.canDecode())) {
+  if (track && !(await track.canDecode())) {
     const codec = await track.getCodecParameterString()
     throw new Error(
       `This browser cannot decode the video codec (${codec ?? 'unknown'}).`,
@@ -136,15 +188,28 @@ async function openSource(sourceId: string): Promise<OpenSource> {
   const audioTrack = await input.getPrimaryAudioTrack()
   const audioDecodable = audioTrack ? await audioTrack.canDecode() : false
 
+  // A file with neither is not media this editor can use; a file with only
+  // sound is music, which is exactly what an audio row is for.
+  if (!track && !audioDecodable) {
+    throw new Error(
+      `${file.name} has no video and no audio this browser can decode.`,
+    )
+  }
+
   const opened: OpenSource = {
     input,
     track,
     audioTrack: audioDecodable ? audioTrack : null,
     geometry: {
-      durationMicros: secondsToMicros(await track.computeDuration()),
-      width: await track.getDisplayWidth(),
-      height: await track.getDisplayHeight(),
-      rotation: await track.getRotation(),
+      durationMicros: secondsToMicros(
+        track
+          ? await track.computeDuration()
+          : await audioTrack!.computeDuration(),
+      ),
+      hasVideo: track !== null,
+      width: track ? await track.getDisplayWidth() : 0,
+      height: track ? await track.getDisplayHeight() : 0,
+      rotation: track ? await track.getRotation() : 0,
       audio:
         audioDecodable && audioTrack
           ? {
@@ -164,47 +229,80 @@ function requireProject(): Project {
   return project
 }
 
-export type RenderItem = {
+/** What one video row is showing at a moment: a segment, or nothing. */
+type RowFrame = {
   timelineMicros: number
+  segmentId: string | null
   frame: VideoFrame | null
 }
 
 /**
- * Walks the timeline from `fromMicros` to the end, yielding what should be on
- * screen. Clips yield decoded frames; gaps yield a single null.
- *
- * Crossing a clip boundary just means the current iterator runs out and the
- * next one opens. The seek that costs happens while the UI thread still holds
- * a buffer of frames, so no scheduling is needed here.
+ * Everything that should be on screen at one moment: one entry per video row
+ * that has a picture. Rows are stacked by the renderer, not here.
  */
-async function* walkTimeline(
+export type RenderItem = {
+  timelineMicros: number
+  layers: { segmentId: string; frame: VideoFrame }[]
+}
+
+/** Frees every frame an item is carrying. */
+function closeItem(item: RenderItem): void {
+  for (const layer of item.layers) layer.frame.close()
+}
+
+/**
+ * Walks ONE video row, yielding its decoded frames and a null wherever it has
+ * nothing.
+ *
+ * A row is walked on its own because that is what it is: an independent strip
+ * of footage. What ends up visible is decided later, by stacking the rows.
+ */
+async function* walkTrack(
   current: Project,
+  track: Track,
   fromMicros: number,
   myGeneration: number,
-): AsyncGenerator<RenderItem> {
+): AsyncGenerator<RowFrame> {
   const endMicros = timelineDuration(current)
   let position = Math.max(0, fromMicros)
 
   while (position < endMicros && myGeneration === generation) {
-    const found = clipAt(current, position)
+    const segment = track.segments.find((candidate) =>
+      segmentCovers(candidate, position),
+    )
 
-    if (!found) {
-      // A gap: one black item covering it, then jump to the next clip.
-      const next = current.videoTrack.clips.find(
-        (clip) => clip.timelineStartMicros > position,
+    if (!segment) {
+      // Nothing on this row here: report the hole, then skip to whatever it
+      // shows next. Another row may well be filling the picture meanwhile.
+      const next = track.segments.find(
+        (candidate) => candidate.timelineStartMicros > position,
       )
-      yield { timelineMicros: position, frame: null }
+      yield { timelineMicros: position, segmentId: null, frame: null }
       position = next ? next.timelineStartMicros : endMicros
       continue
     }
 
-    const { clip } = found
-    const clipEnd = clipEndMicros(clip)
-    const samples = new VideoSampleSink(
-      (await openSource(clip.sourceId)).track,
-    ).samples(
-      microsToSeconds(found.sourceMicros),
-      microsToSeconds(clip.sourceOutMicros),
+    const content = videoContent(segment)
+    if (!content) {
+      position = segmentEndMicros(segment)
+      continue
+    }
+
+    const segmentEnd = segmentEndMicros(segment)
+    const sourceMicros = sourceMicrosAt(segment, position)
+
+    const opened = await openSource(content.sourceId)
+    if (!opened.track) {
+      // A segment on a video row pointing at a file with no picture. Nothing
+      // to decode, so the row shows a hole for as long as it lasts.
+      yield { timelineMicros: position, segmentId: null, frame: null }
+      position = segmentEnd
+      continue
+    }
+
+    const samples = new VideoSampleSink(opened.track).samples(
+      microsToSeconds(sourceMicros),
+      microsToSeconds(content.sourceOutMicros),
     )
 
     try {
@@ -214,62 +312,305 @@ async function* walkTimeline(
           return
         }
 
-        const sourceMicros = Math.round(sample.microsecondTimestamp)
+        const decodedMicros = Math.round(sample.microsecondTimestamp)
         const frame = takeFrame(sample)
 
         // A sink returns the sample covering the requested time, which can
-        // start before it. Clamp so timeline timestamps stay monotonic.
+        // start before it. Clamp so timeline timestamps stay monotonic. The
+        // source-to-timeline step is where the rate comes in: at double speed
+        // a second of footage lands in half a second of timeline.
         const timelineMicros = Math.max(
           position,
-          clip.timelineStartMicros + (sourceMicros - clip.sourceInMicros),
+          segment.timelineStartMicros +
+            timelineSpanFor(segment, decodedMicros - content.sourceInMicros),
         )
 
-        if (timelineMicros >= clipEnd) {
+        if (timelineMicros >= segmentEnd) {
           frame.close()
           break
         }
 
-        yield { timelineMicros, frame }
+        yield { timelineMicros, segmentId: segment.id, frame }
       }
     } finally {
       await samples.return()
     }
 
-    position = clipEnd
+    position = segmentEnd
   }
 }
 
 /**
- * Walks the timeline yielding decoded PCM, clip by clip.
+ * Walks only the TRANSITION WINDOWS of one video row.
+ *
+ * While a transition runs, its row has two segments on screen at once: the
+ * outgoing one, which the ordinary walk above is already producing, and the
+ * incoming one blending over it. One iterator cannot yield two streams, so the
+ * incoming side gets its own - and because a transition only ever involves a
+ * segment and its immediate neighbour, and two transitions are never allowed
+ * to overlap, one extra stream per row is always enough.
+ *
+ * The material is the incoming segment's OWN first frames. Nothing is decoded
+ * twice and no footage beyond a segment's range is needed: what used to play
+ * just after the cut now plays across it.
+ */
+async function* walkTransitions(
+  current: Project,
+  track: Track,
+  fromMicros: number,
+  myGeneration: number,
+): AsyncGenerator<RowFrame> {
+  const endMicros = timelineDuration(current)
+  let position = Math.max(0, fromMicros)
+
+  const windowOf = (segment: Segment) => transitionWindow(segment)
+
+  while (position < endMicros && myGeneration === generation) {
+    const active = track.segments.find((segment) => {
+      const window = windowOf(segment)
+      return (
+        window !== null &&
+        position >= window.startMicros &&
+        position < window.endMicros
+      )
+    })
+
+    if (!active) {
+      // Between transitions this row contributes no second picture at all.
+      const next = track.segments.find((segment) => {
+        const window = windowOf(segment)
+        return window !== null && window.startMicros > position
+      })
+
+      yield { timelineMicros: position, segmentId: null, frame: null }
+      position = next ? windowOf(next)!.startMicros : endMicros
+      continue
+    }
+
+    const window = windowOf(active)!
+    const content = videoContent(active)
+    const opened = content ? await openSource(content.sourceId) : null
+
+    if (!content || !opened?.track) {
+      yield { timelineMicros: position, segmentId: null, frame: null }
+      position = window.endMicros
+      continue
+    }
+
+    const sourceFrom = sourceMicrosAt(active, position)
+    const sourceTo = sourceMicrosAt(active, window.endMicros)
+
+    const samples = new VideoSampleSink(opened.track).samples(
+      microsToSeconds(sourceFrom),
+      microsToSeconds(sourceTo),
+    )
+
+    try {
+      for await (const sample of samples) {
+        if (myGeneration !== generation) {
+          sample.close()
+          return
+        }
+
+        const decodedMicros = Math.round(sample.microsecondTimestamp)
+        const frame = takeFrame(sample)
+        const timelineMicros = Math.max(
+          position,
+          active.timelineStartMicros +
+            timelineSpanFor(active, decodedMicros - content.sourceInMicros),
+        )
+
+        if (timelineMicros >= window.endMicros) {
+          frame.close()
+          break
+        }
+
+        yield { timelineMicros, segmentId: active.id, frame }
+      }
+    } finally {
+      await samples.return()
+    }
+
+    // The window is over: clear this stream so the blend stops.
+    yield { timelineMicros: window.endMicros, segmentId: null, frame: null }
+    position = window.endMicros
+  }
+}
+
+/**
+ * The moments at which the picture can change without any video row producing
+ * a frame: a caption appearing or disappearing.
+ *
+ * Without these an export would hold one rendered frame across a whole gap,
+ * and a caption that started inside that gap would never appear in the file
+ * even though the preview shows it.
+ */
+function textEdgeTimes(
+  current: Project,
+  fromMicros: number,
+  endMicros: number,
+): number[] {
+  const edges = new Set<number>()
+
+  for (const track of current.tracks) {
+    if (track.kind !== 'text') continue
+    for (const segment of track.segments) {
+      for (const edge of [
+        segment.timelineStartMicros,
+        segmentEndMicros(segment),
+      ]) {
+        if (edge > fromMicros && edge < endMicros) edges.add(edge)
+      }
+    }
+  }
+
+  return [...edges].sort((a, b) => a - b)
+}
+
+/**
+ * Walks the timeline from `fromMicros` to the end, yielding what should be on
+ * screen at each moment it changes.
+ *
+ * Every video row is walked independently and the results are merged: an item
+ * comes out whenever ANY row produces a new frame, carrying the current
+ * picture from all of them. A row that has not moved keeps showing what it
+ * showed, which is why each item gets its own CLONE of that frame rather than
+ * a shared reference - an item is closed once it has been drawn, and the row
+ * still needs its original for the next one.
+ *
+ * Which of the merged rows actually gets painted is renderFrame's business,
+ * not this walk's. Deciding it twice is how a preview and an export drift
+ * apart, so it is decided once, there.
+ */
+async function* walkTimeline(
+  current: Project,
+  fromMicros: number,
+  myGeneration: number,
+): AsyncGenerator<RenderItem> {
+  const endMicros = timelineDuration(current)
+  const start = Math.max(0, fromMicros)
+  if (start >= endMicros) return
+
+  // Two streams per row: what it is playing, and what is blending into it.
+  const iterators = videoTracks(current).flatMap((track) => [
+    walkTrack(current, track, start, myGeneration),
+    walkTransitions(current, track, start, myGeneration),
+  ])
+
+  /** What each stream is showing now. Owned here, and closed here. */
+  const showing: (RowFrame | null)[] = iterators.map(() => null)
+  /** The next item each stream has ready, peeked so the merge can order them. */
+  const peeked: (RowFrame | null)[] = iterators.map(() => null)
+
+  const edges = textEdgeTimes(current, start, endMicros)
+  let edgeIndex = 0
+  /** Set once the first item has been emitted, so `start` is always covered. */
+  let emitted = false
+
+  function release(row: RowFrame | null) {
+    row?.frame?.close()
+  }
+
+  try {
+    for (let i = 0; i < iterators.length; i++) {
+      peeked[i] = (await iterators[i]!.next()).value ?? null
+    }
+
+    while (myGeneration === generation) {
+      let at: number | null = emitted ? null : start
+
+      for (const row of peeked) {
+        if (row && (at === null || row.timelineMicros < at)) {
+          at = row.timelineMicros
+        }
+      }
+
+      const edge = edgeIndex < edges.length ? edges[edgeIndex]! : null
+      if (edge !== null && (at === null || edge < at)) at = edge
+
+      if (at === null) break
+
+      for (let i = 0; i < iterators.length; i++) {
+        while (peeked[i] && peeked[i]!.timelineMicros <= at) {
+          release(showing[i])
+          showing[i] = peeked[i]
+          peeked[i] = (await iterators[i]!.next()).value ?? null
+          if (myGeneration !== generation) return
+        }
+      }
+
+      if (edge !== null && edge <= at) edgeIndex++
+
+      const layers: { segmentId: string; frame: VideoFrame }[] = []
+      for (const row of showing) {
+        if (!row?.frame || !row.segmentId) continue
+        // Clone: this item owns what it carries, and the row keeps its own.
+        layers.push({ segmentId: row.segmentId, frame: row.frame.clone() })
+      }
+
+      emitted = true
+      const item: RenderItem = { timelineMicros: at, layers }
+      try {
+        yield item
+      } catch (err) {
+        closeItem(item)
+        throw err
+      }
+    }
+  } finally {
+    for (const row of showing) release(row)
+    for (const row of peeked) release(row)
+    for (const iterator of iterators) await iterator.return(undefined)
+  }
+}
+
+/** The layers of an item, in the shape renderFrame reads them. */
+function layersOf(item: RenderItem): DecodedLayers {
+  return new Map(item.layers.map((layer) => [layer.segmentId, layer.frame]))
+}
+
+/**
+ * Walks the timeline yielding decoded PCM, segment by segment.
  *
  * Gaps yield nothing at all: silence is the absence of scheduled audio, not a
- * buffer of zeroes. Chunks are trimmed to the clip's source range frame by
- * frame, so trimming a clip trims its audio exactly rather than to the nearest
+ * buffer of zeroes. Chunks are trimmed to the source range frame by frame, so
+ * trimming a segment trims its audio exactly rather than to the nearest
  * decoded packet.
+ *
+ * Every row that makes a sound is walked - audio rows and video rows alike,
+ * since a clip carries its own audio and a row hidden behind another is still
+ * heard. Rows are walked one at a time so the chunks of a single row arrive
+ * contiguously, which is what lets the export join them into long runs instead
+ * of scheduling a node per packet.
  */
 async function* walkAudio(
   current: Project,
   fromMicros: number,
   myGeneration: number,
 ): AsyncGenerator<AudioChunk> {
-  for (const clip of current.videoTrack.clips) {
+  for (const segment of soundTracks(current).flatMap(
+    (track) => track.segments,
+  )) {
     if (myGeneration !== generation) return
 
-    const clipEnd = clipEndMicros(clip)
-    if (clipEnd <= fromMicros) continue
+    const content = soundContent(segment)
+    if (!content) continue
 
-    const opened = await openSource(clip.sourceId)
+    const segmentEnd = segmentEndMicros(segment)
+    if (segmentEnd <= fromMicros) continue
+
+    const opened = await openSource(content.sourceId)
     if (!opened.audioTrack) continue
 
-    // Start part way in if playback began mid-clip.
+    // Start part way in if playback began mid-segment.
     const startSourceMicros =
-      fromMicros > clip.timelineStartMicros
-        ? clip.sourceInMicros + (fromMicros - clip.timelineStartMicros)
-        : clip.sourceInMicros
+      fromMicros > segment.timelineStartMicros
+        ? sourceMicrosAt(segment, fromMicros)
+        : content.sourceInMicros
 
     const samples = new AudioSampleSink(opened.audioTrack).samples(
       microsToSeconds(startSourceMicros),
-      microsToSeconds(clip.sourceOutMicros),
+      microsToSeconds(content.sourceOutMicros),
     )
 
     try {
@@ -285,9 +626,9 @@ async function* walkAudio(
           const sampleEnd =
             sampleStart + Math.round((sample.numberOfFrames / rate) * 1e6)
 
-          // Trim to the clip and to where playback actually starts.
+          // Trim to the segment and to where playback actually starts.
           const from = Math.max(sampleStart, startSourceMicros)
-          const to = Math.min(sampleEnd, clip.sourceOutMicros)
+          const to = Math.min(sampleEnd, content.sourceOutMicros)
           if (to <= from) continue
 
           const frameOffset = Math.round(((from - sampleStart) / 1e6) * rate)
@@ -309,10 +650,22 @@ async function* walkAudio(
             planes.push(plane)
           }
 
+          const chunkStartMicros =
+            segment.timelineStartMicros +
+            timelineSpanFor(segment, from - content.sourceInMicros)
+
+          // Speed is applied by LYING about the sample rate: the same samples
+          // reported at twice the rate play in half the time, and the audio
+          // graph does the resampling on the way in. It shifts pitch, exactly
+          // as speeding up a tape does; preserving pitch would need a real
+          // time-stretch and is a different feature.
+          const playbackRate = rate * segmentRate(segment)
+
+          applyVolume(segment, planes, chunkStartMicros, playbackRate)
+
           yield {
-            timelineMicros:
-              clip.timelineStartMicros + (from - clip.sourceInMicros),
-            sampleRate: rate,
+            timelineMicros: chunkStartMicros,
+            sampleRate: playbackRate,
             planes,
           }
         } finally {
@@ -323,6 +676,103 @@ async function* walkAudio(
       await samples.return()
     }
   }
+}
+
+/**
+ * Scales decoded samples by the segment's volume, in place.
+ *
+ * Done to the PCM rather than to a gain node in the graph, because live
+ * playback schedules buffers and the export renders offline - two mechanisms
+ * that would each need their own envelope and could each get it wrong. Scaling
+ * the samples once, here, means there is only one answer to how loud something
+ * is.
+ */
+function applyVolume(
+  segment: Segment,
+  planes: Float32Array<ArrayBuffer>[],
+  timelineMicros: number,
+  sampleRate: number,
+): void {
+  if (!isPropertyAnimated(segment, 'volume')) {
+    const gain = propertyAt(segment, 'volume', timelineMicros)
+    if (gain === 1) return
+
+    for (const plane of planes) {
+      for (let i = 0; i < plane.length; i++) plane[i]! *= gain
+    }
+    return
+  }
+
+  // Animated: the gain is read per sample, so a fade is a ramp rather than a
+  // staircase at the packet boundaries.
+  const frames = planes[0]?.length ?? 0
+  for (let i = 0; i < frames; i++) {
+    const gain = volumeAt(
+      segment,
+      timelineMicros + Math.round((i / sampleRate) * 1e6),
+    )
+    for (const plane of planes) plane[i]! *= gain
+  }
+}
+
+/**
+ * Measures the waveform of a whole source, once.
+ *
+ * The loudest sample in each bucket rather than an average: an average of a
+ * waveform tends to zero, because it is as often below the line as above it.
+ * Only the first channel is read - a second one would double the work to draw
+ * a shape a few pixels tall that nobody could tell apart.
+ */
+async function measurePeaks(sourceId: string): Promise<{
+  peaks: Float32Array<ArrayBuffer>
+  bucketsPerSecond: number
+}> {
+  const opened = await openSource(sourceId)
+  const track = opened.audioTrack
+  if (!track) {
+    return {
+      peaks: new Float32Array(0) as Float32Array<ArrayBuffer>,
+      bucketsPerSecond: WAVEFORM_BUCKETS_PER_SECOND,
+    }
+  }
+
+  const durationMicros = opened.geometry.durationMicros
+  const bucketCount = Math.max(
+    1,
+    Math.ceil((durationMicros / 1e6) * WAVEFORM_BUCKETS_PER_SECOND),
+  )
+  const peaks = new Float32Array(bucketCount) as Float32Array<ArrayBuffer>
+
+  const samples = new AudioSampleSink(track).samples(0, undefined)
+  try {
+    for await (const sample of samples) {
+      try {
+        const frames = sample.numberOfFrames
+        if (frames === 0) continue
+
+        const plane = new Float32Array(frames)
+        sample.copyTo(plane, { planeIndex: 0, format: 'f32-planar' })
+
+        const rate = sample.sampleRate
+        const startMicros = sample.timestamp * 1e6
+
+        for (let i = 0; i < frames; i++) {
+          const at = startMicros + (i / rate) * 1e6
+          const bucket = Math.floor((at / 1e6) * WAVEFORM_BUCKETS_PER_SECOND)
+          if (bucket < 0 || bucket >= bucketCount) continue
+
+          const value = Math.abs(plane[i]!)
+          if (value > peaks[bucket]!) peaks[bucket] = value
+        }
+      } finally {
+        sample.close()
+      }
+    }
+  } finally {
+    await samples.return()
+  }
+
+  return { peaks, bucketsPerSecond: WAVEFORM_BUCKETS_PER_SECOND }
 }
 
 function postAudioChunk(
@@ -346,43 +796,58 @@ function postFrame(
     generation: myGeneration,
     mode,
     timelineMicros: item.timelineMicros,
-    frame: item.frame,
+    layers: item.layers,
   }
 
   try {
-    scope.postMessage(message, item.frame ? [item.frame] : [])
+    scope.postMessage(
+      message,
+      item.layers.map((layer) => layer.frame),
+    )
   } catch (err) {
-    item.frame?.close()
+    closeItem(item)
     throw err
   }
 }
 
-/** Decodes the single item at a timeline position, for a paused preview. */
+/**
+ * Decodes the single item at a timeline position, for a paused preview.
+ *
+ * Every row that has to be drawn is decoded, not just the top one: a scaled or
+ * faded segment lets what is under it show through, and a paused preview has
+ * to show the same picture playback would.
+ */
 async function seek(timelineMicros: number, myGeneration: number) {
   const current = requireProject()
-  const found = clipAt(current, timelineMicros)
+  const wanted = visibleVideoSegmentsAt(current, timelineMicros)
 
-  if (!found) {
-    postFrame({ timelineMicros, frame: null }, 'seek', myGeneration)
-    return
+  const layers: { segmentId: string; frame: VideoFrame }[] = []
+  const item: RenderItem = { timelineMicros, layers }
+
+  try {
+    for (const { segment, sourceMicros } of wanted) {
+      const content = segment.content as VideoContent
+      const { track } = await openSource(content.sourceId)
+      if (!track) continue
+
+      const sample = await new VideoSampleSink(track).getSample(
+        microsToSeconds(sourceMicros),
+      )
+      if (!sample) continue
+
+      layers.push({ segmentId: segment.id, frame: takeFrame(sample) })
+    }
+  } catch (err) {
+    closeItem(item)
+    throw err
   }
 
-  const { track } = await openSource(found.clip.sourceId)
-  const sample = await new VideoSampleSink(track).getSample(
-    microsToSeconds(found.sourceMicros),
-  )
-  if (!sample) {
-    postFrame({ timelineMicros, frame: null }, 'seek', myGeneration)
-    return
-  }
-
-  const frame = takeFrame(sample)
   if (myGeneration !== generation) {
-    frame.close()
+    closeItem(item)
     return
   }
 
-  postFrame({ timelineMicros, frame }, 'seek', myGeneration)
+  postFrame(item, 'seek', myGeneration)
 }
 
 /** Streams the timeline's audio to the UI thread, which schedules it. */
@@ -421,11 +886,14 @@ async function play(fromMicros: number, myGeneration: number) {
 
   for await (const item of walkTimeline(current, fromMicros, myGeneration)) {
     if (myGeneration !== generation) {
-      item.frame?.close()
+      closeItem(item)
       return
     }
 
-    inFlight.push(item.timelineMicros)
+    inFlight.push({
+      timelineMicros: item.timelineMicros,
+      frames: item.layers.length,
+    })
     postFrame(item, 'play', myGeneration)
 
     if (bufferIsFull()) {
@@ -463,12 +931,23 @@ async function decodeAudioForExport(myGeneration: number) {
   }
 }
 
+/** The encoder preset behind each name the project can choose. */
+const QUALITY_FOR: Record<ExportQuality, typeof QUALITY_HIGH> = {
+  low: QUALITY_LOW,
+  medium: QUALITY_MEDIUM,
+  high: QUALITY_HIGH,
+  'very-high': QUALITY_VERY_HIGH,
+}
+
 async function exportMp4(
   myGeneration: number,
   audio: { sampleRate: number; planes: Float32Array<ArrayBuffer>[] } | null,
 ) {
   const current = requireProject()
-  const { width, height } = current.composition
+  const settings = exportSettingsOf(current)
+  const { width, height } = exportDimensions(current.composition, settings)
+  const quality = QUALITY_FOR[settings.quality]
+
   const totalMicros = timelineDuration(current)
   if (totalMicros <= 0) {
     throw new Error('There is nothing on the timeline to export.')
@@ -477,7 +956,7 @@ async function exportMp4(
   const format = new Mp4OutputFormat()
   const codec = await getFirstEncodableVideoCodec(
     format.getSupportedVideoCodecs(),
-    { width, height, quality: QUALITY_HIGH },
+    { width, height, quality },
   )
   if (!codec) {
     throw new Error(
@@ -491,8 +970,19 @@ async function exportMp4(
     throw new Error('Could not get a 2D context for the export canvas.')
   }
 
+  // The render function draws in COMPOSITION coordinates and knows nothing
+  // about the file being written. Scaling the context once here is what lets
+  // the same function fill an export canvas of a different size - so exporting
+  // at another resolution cannot draw anything differently, only larger or
+  // smaller. Filter radii scale with it, which is what you want: a blur is a
+  // fraction of the picture, not a number of output pixels.
+  context.scale(
+    width / current.composition.width,
+    height / current.composition.height,
+  )
+
   const output = new Output({ format, target: new BufferTarget() })
-  const source = new CanvasSource(canvas, { codec, quality: QUALITY_HIGH })
+  const source = new CanvasSource(canvas, { codec, quality })
   output.addVideoTrack(source)
 
   // Every track has to be added before the output starts.
@@ -539,16 +1029,16 @@ async function exportMp4(
   try {
     for await (const item of walkTimeline(current, 0, myGeneration)) {
       if (myGeneration !== generation) {
-        item.frame?.close()
+        closeItem(item)
         return
       }
 
       await flush(item.timelineMicros)
 
       try {
-        renderFrame(context, current, item.timelineMicros, item.frame)
+        renderFrame(context, current, item.timelineMicros, layersOf(item))
       } finally {
-        item.frame?.close()
+        closeItem(item)
       }
       pending = item.timelineMicros
 
@@ -712,6 +1202,37 @@ scope.addEventListener('message', (event) => {
         openSources: sources.size,
       })
       return
+
+    case 'peaks': {
+      const { sourceId, generation: asked } = message
+      // Deliberately not guarded by generation: a waveform is a property of
+      // the file, not of what is on the timeline, so it stays true across
+      // every edit that happens while it is being measured.
+      void measurePeaks(sourceId)
+        .then(({ peaks, bucketsPerSecond }) => {
+          scope.postMessage(
+            {
+              type: 'peaks',
+              generation: asked,
+              sourceId,
+              peaks,
+              bucketsPerSecond,
+            },
+            [peaks.buffer],
+          )
+        })
+        .catch((error) => {
+          console.warn('[worker] could not measure a waveform:', error)
+          scope.postMessage({
+            type: 'peaks',
+            generation: asked,
+            sourceId,
+            peaks: new Float32Array(0) as Float32Array<ArrayBuffer>,
+            bucketsPerSecond: WAVEFORM_BUCKETS_PER_SECOND,
+          })
+        })
+      return
+    }
   }
 })
 

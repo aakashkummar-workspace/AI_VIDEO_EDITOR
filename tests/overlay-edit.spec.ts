@@ -6,7 +6,23 @@ const SECOND = 1_000_000
 
 function overlays(page: Page) {
   return page.evaluate(
-    () => window.__timelineStore.getState().project.overlays,
+    () => {
+      const project = window.__timelineStore.getState().project
+      return project.tracks
+        .filter((track) => track.kind === 'text')
+        .flatMap((track) => track.segments)
+        .flatMap((segment) =>
+          segment.content.kind === 'text'
+            ? [
+                {
+                  id: segment.id,
+                  timelineStartMicros: segment.timelineStartMicros,
+                  ...segment.content,
+                },
+              ]
+            : [],
+        )
+    },
   )
 }
 
@@ -34,7 +50,7 @@ test.beforeEach(async ({ page }) => {
     throw error
   })
   await page.goto('/')
-  await page.setInputFiles('input[type=file]', FIXTURE.path)
+  await page.setInputFiles('[data-testid=media-input]', FIXTURE.path)
   await expect(page.getByTestId('clip')).toBeVisible()
 
   // Put the playhead at 1s, then drop an overlay there.
@@ -52,10 +68,11 @@ test('adding text puts an overlay on its own row at the playhead', async ({
     { content: 'Text', timelineStartMicros: 1 * SECOND, durationMicros: 2 * SECOND },
   ])
 
-  // The overlay row sits below the clip row, not on top of it.
+  // Rows are stacked the way they composite: the text row draws over the
+  // video row, so it sits above it here rather than below.
   const clip = (await page.getByTestId('clip').first().boundingBox())!
   const overlay = await overlayBox(page)
-  expect(overlay.y).toBeGreaterThan(clip.y)
+  expect(overlay.y).toBeLessThan(clip.y)
 })
 
 test('an overlay drags along its row', async ({ page }) => {

@@ -58,6 +58,42 @@ export const FIXTURE_TONES_44K = {
 }
 
 /**
+ * A green screen: a flat keying green with a red block moving across it.
+ *
+ * Flat and evenly lit on purpose. A real green screen is neither, and the
+ * shader is built for that, but a test wants an answer it can state exactly:
+ * everything green should go, the red block should stay.
+ */
+export const FIXTURE_GREEN = {
+  path: 'tests/fixtures/green-screen.mp4',
+  frames: 60,
+  width: 320,
+  height: 240,
+  fps: 30,
+  solidColor: '#00b140',
+  markerColor: '#ff2020',
+  marker: 'block',
+}
+
+/**
+ * A fixture with NO PICTURE AT ALL: a piece of music, in other words.
+ *
+ * `frames: 0` is what makes it audio-only. Importing one of these is the whole
+ * point of an audio row, and it exercises the paths that must not assume every
+ * source has a video track.
+ */
+export const FIXTURE_MUSIC = {
+  path: 'tests/fixtures/music-only.mp4',
+  frames: 0,
+  width: 0,
+  height: 0,
+  fps: 30,
+  seconds: 4,
+  audioSampleRate: 48_000,
+  toneHz: [220, 330, 440, 550],
+}
+
+/**
  * Timestamp to seek to in order to land on `goldenFrame`. Aiming at the middle
  * of the frame's interval keeps the seek robust against rounding in the muxed
  * timestamps.

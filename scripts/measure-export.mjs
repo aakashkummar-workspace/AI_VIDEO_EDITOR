@@ -39,7 +39,7 @@ const heapMb = () =>
 
 for (const path of paths) {
   await page.goto('http://localhost:5173/')
-  await page.setInputFiles('input[type=file]', path)
+  await page.setInputFiles('[data-testid=media-input]', path)
   await page.waitForSelector('[data-testid=clip]')
 
   const duration = await page.getByTestId('time').textContent()

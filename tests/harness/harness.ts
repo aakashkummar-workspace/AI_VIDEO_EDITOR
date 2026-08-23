@@ -24,6 +24,7 @@ import {
   registerSourceFile,
 } from '../../src/timeline/sourceRegistry'
 import { useTimelineStore } from '../../src/timeline/store'
+import { MAIN_VIDEO_TRACK_ID } from '../../src/timeline/types'
 
 const canvas = document.getElementById('canvas') as HTMLCanvasElement
 
@@ -104,25 +105,43 @@ async function generateFixture(options: {
    */
   toneHz?: number[]
   audioSampleRate?: number
+  /**
+   * How long an audio-only fixture runs. Ignored when there are frames, which
+   * decide the length themselves.
+   */
+  seconds?: number
+  /** A flat background instead of the cycling palette, for a green screen. */
+  solidColor?: string
+  markerColor?: string
 }) {
   const { frames, width, height, fps } = options
   const hueOffset = options.hueOffset ?? 0
   const marker = options.marker ?? 'bar'
   const format = new Mp4OutputFormat()
 
-  const codec = await getFirstEncodableVideoCodec(
-    format.getSupportedVideoCodecs(),
-    { width, height, quality: QUALITY_HIGH },
-  )
-  if (!codec) throw new Error('No encodable codec for the fixture.')
-
-  const surface = new OffscreenCanvas(width, height)
-  const context = surface.getContext('2d')
-  if (!context) throw new Error('No 2D context for the fixture.')
+  // No frames means no picture: a music file rather than a clip.
+  const wantsVideo = frames > 0
 
   const output = new Output({ format, target: new BufferTarget() })
-  const source = new CanvasSource(surface, { codec, quality: QUALITY_HIGH })
-  output.addVideoTrack(source)
+
+  let surface: OffscreenCanvas | null = null
+  let context: OffscreenCanvasRenderingContext2D | null = null
+  let source: CanvasSource | null = null
+
+  if (wantsVideo) {
+    const codec = await getFirstEncodableVideoCodec(
+      format.getSupportedVideoCodecs(),
+      { width, height, quality: QUALITY_HIGH },
+    )
+    if (!codec) throw new Error('No encodable codec for the fixture.')
+
+    surface = new OffscreenCanvas(width, height)
+    context = surface.getContext('2d')
+    if (!context) throw new Error('No 2D context for the fixture.')
+
+    source = new CanvasSource(surface, { codec, quality: QUALITY_HIGH })
+    output.addVideoTrack(source)
+  }
 
   const toneHz = options.toneHz
   const audioSampleRate = options.audioSampleRate ?? 48_000
@@ -147,12 +166,22 @@ async function generateFixture(options: {
   if (audioSource && toneHz) {
     // One buffer per second, each a pure tone, so the timeline second a decoded
     // window belongs to can be read straight off its frequency.
-    const context = new OfflineAudioContext(1, audioSampleRate, audioSampleRate)
-    const seconds = Math.ceil(frames / fps)
+    const toneContext = new OfflineAudioContext(
+      1,
+      audioSampleRate,
+      audioSampleRate,
+    )
+    const seconds = wantsVideo
+      ? Math.ceil(frames / fps)
+      : (options.seconds ?? toneHz.length)
 
     for (let second = 0; second < seconds; second++) {
       const hz = toneHz[second % toneHz.length]!
-      const buffer = context.createBuffer(1, audioSampleRate, audioSampleRate)
+      const buffer = toneContext.createBuffer(
+        1,
+        audioSampleRate,
+        audioSampleRate,
+      )
       const channel = buffer.getChannelData(0)
 
       for (let i = 0; i < channel.length; i++) {
@@ -163,12 +192,13 @@ async function generateFixture(options: {
     }
   }
 
-  for (let index = 0; index < frames; index++) {
+  for (let index = 0; index < frames && context && source; index++) {
     // Flat blocks keep the clip small and compress near-losslessly.
-    context.fillStyle = `hsl(${(index * 7 + hueOffset) % 360} 70% 45%)`
+    context.fillStyle =
+      options.solidColor ?? `hsl(${(index * 7 + hueOffset) % 360} 70% 45%)`
     context.fillRect(0, 0, width, height)
 
-    context.fillStyle = '#ffffff'
+    context.fillStyle = options.markerColor ?? '#ffffff'
     if (marker === 'bar') {
       context.fillRect((index * 3) % width, 0, 24, height)
     } else {
@@ -180,6 +210,11 @@ async function generateFixture(options: {
       )
     }
 
+    if (options.solidColor) {
+      await source.add(index / fps, 1 / fps)
+      continue
+    }
+
     context.fillStyle = '#000000'
     context.font = 'bold 64px monospace'
     context.textBaseline = 'top'
@@ -188,6 +223,7 @@ async function generateFixture(options: {
     await source.add(index / fps, 1 / fps)
   }
 
+  source?.close()
   audioSource?.close()
   await output.finalize()
   const buffer = output.target.buffer
@@ -238,7 +274,19 @@ async function loadProject(spec: ProjectSpec) {
   }
 
   spec.clips.forEach((clip, index) =>
-    store.addClip({ id: `clip-${index}`, ...clip }),
+    store.addSegment({
+      trackId: MAIN_VIDEO_TRACK_ID,
+      segment: {
+        id: `clip-${index}`,
+        timelineStartMicros: clip.timelineStartMicros,
+        content: {
+          kind: 'video',
+          sourceId: clip.sourceId,
+          sourceInMicros: clip.sourceInMicros,
+          sourceOutMicros: clip.sourceOutMicros,
+        },
+      },
+    }),
   )
 
   const project = useTimelineStore.getState().project
@@ -250,6 +298,30 @@ async function loadProject(spec: ProjectSpec) {
     height: project.composition.height,
     durationMicros: timelineDuration(project),
   }
+}
+
+/**
+ * Registers one source with the store and the worker, without placing
+ * anything on the timeline.
+ *
+ * Specs that need a row this harness does not build for them - an audio row,
+ * say - use this and then place segments through the store themselves.
+ */
+async function addSourceFromUrl(url: string, sourceId: string) {
+  const file = await fetchAsFile(url, `${sourceId}.mp4`)
+  registerSourceFile(sourceId, file)
+
+  const geometry = await player.probeSource(sourceId, file)
+  useTimelineStore.getState().addSource({
+    id: sourceId,
+    name: url.split('/').pop() ?? sourceId,
+    durationMicros: geometry.durationMicros,
+    width: geometry.width,
+    height: geometry.height,
+    rotation: geometry.rotation,
+  })
+
+  return geometry
 }
 
 /** Loads the MP4 the last export produced as a single full-length clip. */
@@ -274,12 +346,18 @@ async function loadExported() {
     height: geometry.height,
     rotation: geometry.rotation,
   })
-  store.addClip({
-    id: 'clip-exported',
-    sourceId,
-    sourceInMicros: 0,
-    sourceOutMicros: geometry.durationMicros,
-    timelineStartMicros: 0,
+  store.addSegment({
+    trackId: MAIN_VIDEO_TRACK_ID,
+    segment: {
+      id: 'clip-exported',
+      timelineStartMicros: 0,
+      content: {
+        kind: 'video',
+        sourceId,
+        sourceInMicros: 0,
+        sourceOutMicros: geometry.durationMicros,
+      },
+    },
   })
 
   const project = useTimelineStore.getState().project
@@ -451,6 +529,7 @@ Object.assign(window, {
     generateFixture,
     audioWindows,
     loadProject,
+    addSourceFromUrl,
     loadExported,
     pixelsAt,
     exportMp4,
