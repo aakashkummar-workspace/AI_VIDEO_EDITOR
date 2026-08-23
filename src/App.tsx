@@ -41,6 +41,8 @@ import {
   exportSettingsOf,
   findSegment,
   propertyAt,
+  segmentDuration,
+  segmentRate,
   soundContent,
   sourceHasVideo,
   trackOf,
@@ -93,6 +95,9 @@ const LEVEL_FIELDS: PropertyField[] = [
 ]
 
 const EFFECT_KIND_NAMES = Object.keys(EFFECT_KINDS) as EffectKind[]
+
+/** The speeds offered as one click, since these are the ones people want. */
+const RATE_PRESETS = [0.25, 0.5, 1, 2, 4]
 
 /** How each quality is labelled, since the names alone are a bit bare. */
 const QUALITY_LABELS: Record<string, string> = {
@@ -372,8 +377,19 @@ export default function App() {
       const drag = dragRef.current
       if (!drag) return
       dragRef.current = null
+
+      // Where the gesture left the preview. The playhead moves there for real
+      // rather than snapping back to wherever it was before the drag: trimming
+      // a head forward leaves the old position in a gap, and the preview would
+      // go black for an edit that was meant to be shown.
+      const landedAt = previewTargetRef.current
       previewTargetRef.current = null
       setPreviewProject(null)
+
+      if (landedAt !== null && drag.moved) {
+        currentMicrosRef.current = landedAt
+        setCurrentMicros(landedAt)
+      }
 
       if (!drag.moved) return
       swallowNextSeekRef.current = true
@@ -1208,6 +1224,47 @@ export default function App() {
             <div className="transform-form">
               {TRANSFORM_FIELDS.map(propertyField)}
             </div>
+          </section>
+        )}
+
+        {selectedSegment && selectedSegmentId && selectedHasSound && (
+          <section className="panel" data-testid="speed-panel">
+            <h2 className="panel-title">Speed</h2>
+            <div className="track-buttons">
+              {RATE_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  className={
+                    segmentRate(selectedSegment) === preset
+                      ? 'rate-preset is-current'
+                      : 'rate-preset'
+                  }
+                  data-testid={`rate-${preset}`}
+                  onClick={() => {
+                    try {
+                      useTimelineStore
+                        .getState()
+                        .setSegmentRate({
+                          segmentId: selectedSegmentId,
+                          rate: preset,
+                        })
+                      setError(null)
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : String(err))
+                    }
+                  }}
+                >
+                  {preset}x
+                </button>
+              ))}
+            </div>
+            <p className="panel-note" data-testid="speed-summary">
+              {formatMicros(segmentDuration(selectedSegment))} on the timeline
+              {segmentRate(selectedSegment) !== 1
+                ? '. Sound is pitched by the same amount, as speeding up a tape would.'
+                : '.'}
+            </p>
           </section>
         )}
 

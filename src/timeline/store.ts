@@ -60,6 +60,7 @@ export type TimelineStore = {
   trimSegmentStart: (input: TrimInput) => void
   trimSegmentEnd: (input: TrimInput) => void
   splitSegmentAt: (input: SplitSegmentInput) => void
+  setSegmentRate: (input: { segmentId: string; rate: number }) => void
   setTransition: (input: TransitionInput) => void
   removeTransition: (segmentId: string) => void
   setTextStyle: (input: TextStyleInput) => void
@@ -196,6 +197,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     trimSegmentStart: (input) => apply(mutators.trimSegmentStart, input),
     trimSegmentEnd: (input) => apply(mutators.trimSegmentEnd, input),
     splitSegmentAt: (input) => apply(mutators.splitSegmentAt, input),
+    /** Dragging a speed slider is one edit, like every other slider. */
+    setSegmentRate: (input) =>
+      apply(mutators.setSegmentRate, input, `rate:${input.segmentId}`),
     /** Dragging the length of a transition is one edit, like any other slider. */
     setTransition: (input) =>
       apply(

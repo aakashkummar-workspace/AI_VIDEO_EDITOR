@@ -78,6 +78,24 @@
 - A video segment's duration is DERIVED from its source range. Only
   text stores a duration, because it has no source to derive one from.
   Never store a duration next to a range that already implies it.
+- A segment's duration stays DERIVED once speed exists: the source
+  range and the RATE together imply it. Never clamp `segmentDuration`
+  to a minimum - a segment too short to exist has to be visible as such
+  or the checks that reject one have nothing to see.
+- `sourceMicrosAt` is the ONE place timeline time becomes source time.
+  Anything deciding which frame or which sample to fetch goes through
+  it, so the decoder and the renderer cannot disagree about where in a
+  clip they are.
+- Speed is applied to audio by reporting the buffer at a MULTIPLIED
+  sample rate and letting the audio graph resample it. That is what
+  bounds the rate to 0.25x-4x: four times 48kHz is 192kHz, which the
+  platform accepts, and forty times is not. It shifts pitch, exactly as
+  speeding up a tape does. Preserving pitch needs a real time-stretch
+  and is a different feature.
+- `rate` is deliberately NOT one of the animatable properties. Those
+  are values read AT a time; the rate defines what time means for the
+  segment, so a keyframe on it would be circular. Speed ramps need the
+  integral of a rate curve and are a separate feature.
 - Rows composite bottom upwards. `visibleVideoSegmentsAt` decides which
   ones have to be drawn and stops at the first one that covers the
   composition opaquely; a segment that is scaled, moved or faded stops

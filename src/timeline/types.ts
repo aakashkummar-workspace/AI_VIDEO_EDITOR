@@ -280,6 +280,79 @@ export type Segment = {
   effects?: Effect[]
   /** A blend from the previous segment on the same row into this one. */
   transitionIn?: Transition
+  /**
+   * How fast the source plays. 1 is as recorded, 2 twice as fast.
+   *
+   * Deliberately NOT one of the animatable properties. Those are values read
+   * AT a time; this one defines what time even means for the segment, so a
+   * keyframe on it would be circular - you would need the rate to know where
+   * on the curve to look. Speed ramps need the integral of a rate curve and
+   * are a different feature; this is a constant.
+   */
+  rate?: number
+}
+
+/**
+ * The rates a segment may play at.
+ *
+ * Bounded by the resampling trick the mixer uses rather than by taste: audio
+ * is sped up by reporting its buffer at a multiplied sample rate and letting
+ * the audio graph resample it, and a Web Audio buffer's rate has to stay
+ * inside what the platform accepts. Four times a 48kHz source is 192kHz, well
+ * inside it; forty times would not be.
+ */
+export const MIN_RATE = 0.25
+export const MAX_RATE = 4
+
+/** How fast a segment plays. */
+export function segmentRate(segment: Segment): number {
+  const rate = segment.rate
+  return rate === undefined || !Number.isFinite(rate) ? 1 : rate
+}
+
+/** Keeps a rate inside what the mixer can actually play. */
+export function clampRate(rate: number): number {
+  if (!Number.isFinite(rate)) {
+    throw new Error('A rate must be a finite number.')
+  }
+  return Math.min(MAX_RATE, Math.max(MIN_RATE, rate))
+}
+
+/**
+ * Where in its source a segment is at a moment on the timeline.
+ *
+ * The one place the rate turns timeline time into source time. Everything that
+ * needs to know which frame or which sample to fetch goes through here, so
+ * there is a single answer and the decoder and the renderer cannot disagree
+ * about it.
+ */
+export function sourceMicrosAt(
+  segment: Segment,
+  timelineMicros: number,
+): number {
+  const content = segment.content
+  if (content.kind === 'text') return 0
+
+  return (
+    content.sourceInMicros +
+    Math.round((timelineMicros - segment.timelineStartMicros) * segmentRate(segment))
+  )
+}
+
+/** How much source a stretch of timeline consumes at a segment's rate. */
+export function sourceSpanFor(
+  segment: Segment,
+  timelineSpanMicros: number,
+): number {
+  return Math.round(timelineSpanMicros * segmentRate(segment))
+}
+
+/** How much timeline a stretch of source fills at a segment's rate. */
+export function timelineSpanFor(
+  segment: Segment,
+  sourceSpanMicros: number,
+): number {
+  return Math.round(sourceSpanMicros / segmentRate(segment))
 }
 
 /**
@@ -435,14 +508,20 @@ export function trackAllowsOverlap(kind: TrackKind): boolean {
 /**
  * How long a segment runs on the timeline.
  *
- * Derived from the source range for anything with a source; only text stores a
- * duration, because it has no source to derive one from.
+ * Still derived, never stored: the source range and the rate together imply
+ * it. Only text stores a duration, because it has no source to derive one
+ * from.
  */
 export function segmentDuration(segment: Segment): number {
   const content = segment.content
-  return content.kind === 'text'
-    ? content.durationMicros
-    : content.sourceOutMicros - content.sourceInMicros
+  if (content.kind === 'text') return content.durationMicros
+
+  // Not clamped to a minimum: this reports what the range and the rate
+  // actually come to, and a segment too short to exist has to be visible as
+  // such or the checks that reject one have nothing to see.
+  return Math.round(
+    (content.sourceOutMicros - content.sourceInMicros) / segmentRate(segment),
+  )
 }
 
 /** Exclusive end of a segment on the timeline. */

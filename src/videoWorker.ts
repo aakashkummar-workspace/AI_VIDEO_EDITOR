@@ -40,7 +40,10 @@ import {
   propertyAt,
   segmentCovers,
   segmentEndMicros,
+  segmentRate,
   soundContent,
+  sourceMicrosAt,
+  timelineSpanFor,
   transitionWindow,
   videoContent,
   volumeAt,
@@ -285,8 +288,7 @@ async function* walkTrack(
     }
 
     const segmentEnd = segmentEndMicros(segment)
-    const sourceMicros =
-      content.sourceInMicros + (position - segment.timelineStartMicros)
+    const sourceMicros = sourceMicrosAt(segment, position)
 
     const opened = await openSource(content.sourceId)
     if (!opened.track) {
@@ -313,11 +315,13 @@ async function* walkTrack(
         const frame = takeFrame(sample)
 
         // A sink returns the sample covering the requested time, which can
-        // start before it. Clamp so timeline timestamps stay monotonic.
+        // start before it. Clamp so timeline timestamps stay monotonic. The
+        // source-to-timeline step is where the rate comes in: at double speed
+        // a second of footage lands in half a second of timeline.
         const timelineMicros = Math.max(
           position,
           segment.timelineStartMicros +
-            (decodedMicros - content.sourceInMicros),
+            timelineSpanFor(segment, decodedMicros - content.sourceInMicros),
         )
 
         if (timelineMicros >= segmentEnd) {
@@ -392,10 +396,8 @@ async function* walkTransitions(
       continue
     }
 
-    const sourceFrom =
-      content.sourceInMicros + (position - active.timelineStartMicros)
-    const sourceTo =
-      content.sourceInMicros + (window.endMicros - active.timelineStartMicros)
+    const sourceFrom = sourceMicrosAt(active, position)
+    const sourceTo = sourceMicrosAt(active, window.endMicros)
 
     const samples = new VideoSampleSink(opened.track).samples(
       microsToSeconds(sourceFrom),
@@ -414,7 +416,7 @@ async function* walkTransitions(
         const timelineMicros = Math.max(
           position,
           active.timelineStartMicros +
-            (decodedMicros - content.sourceInMicros),
+            timelineSpanFor(active, decodedMicros - content.sourceInMicros),
         )
 
         if (timelineMicros >= window.endMicros) {
@@ -602,7 +604,7 @@ async function* walkAudio(
     // Start part way in if playback began mid-segment.
     const startSourceMicros =
       fromMicros > segment.timelineStartMicros
-        ? content.sourceInMicros + (fromMicros - segment.timelineStartMicros)
+        ? sourceMicrosAt(segment, fromMicros)
         : content.sourceInMicros
 
     const samples = new AudioSampleSink(opened.audioTrack).samples(
@@ -648,12 +650,21 @@ async function* walkAudio(
           }
 
           const chunkStartMicros =
-            segment.timelineStartMicros + (from - content.sourceInMicros)
-          applyVolume(segment, planes, chunkStartMicros, rate)
+            segment.timelineStartMicros +
+            timelineSpanFor(segment, from - content.sourceInMicros)
+
+          // Speed is applied by LYING about the sample rate: the same samples
+          // reported at twice the rate play in half the time, and the audio
+          // graph does the resampling on the way in. It shifts pitch, exactly
+          // as speeding up a tape does; preserving pitch would need a real
+          // time-stretch and is a different feature.
+          const playbackRate = rate * segmentRate(segment)
+
+          applyVolume(segment, planes, chunkStartMicros, playbackRate)
 
           yield {
             timelineMicros: chunkStartMicros,
-            sampleRate: rate,
+            sampleRate: playbackRate,
             planes,
           }
         } finally {

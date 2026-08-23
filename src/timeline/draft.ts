@@ -19,6 +19,8 @@ import {
   ANIMATABLE_PROPERTIES,
   EFFECT_KINDS,
   EXPORT_QUALITIES,
+  MAX_RATE,
+  MIN_RATE,
   MIN_SEGMENT_MICROS,
   TRANSITION_KINDS,
   type AnimatableProperty,
@@ -305,6 +307,14 @@ function parseSegment(value: unknown, what: string): Segment {
     `${what} transition`,
   )
   if (transitionIn) segment.transitionIn = transitionIn
+
+  if (raw.rate !== undefined) {
+    const rate = num(raw.rate, `${what} rate`)
+    if (rate < MIN_RATE || rate > MAX_RATE) {
+      fail(`${what} plays at a speed this version cannot (${rate}x).`)
+    }
+    if (rate !== 1) segment.rate = rate
+  }
 
   return segment
 }

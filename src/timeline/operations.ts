@@ -8,6 +8,10 @@ import {
   TRANSITION_KINDS,
   clampEffectAmount,
   clampProperty,
+  clampRate,
+  sourceMicrosAt,
+  sourceSpanFor,
+  timelineSpanFor,
   transitionProgress,
   findSegment,
   occludesEverything,
@@ -30,7 +34,6 @@ import {
   type TransitionKind,
   type Track,
   type TrackKind,
-  type VideoContent,
 } from './types'
 
 /**
@@ -458,14 +461,17 @@ export const mutators = {
 
     if (content.kind !== 'text') {
       const requested = args.timelineMicros - segment.timelineStartMicros
+
+      // The head may only reach back as far as there is source to reach into,
+      // which at double speed is half as far in timeline terms.
       const minDelta = Math.max(
-        -content.sourceInMicros,
+        -timelineSpanFor(segment, content.sourceInMicros),
         earliestStart - segment.timelineStartMicros,
       )
       const maxDelta = segmentDuration(segment) - MIN_SEGMENT_MICROS
       const delta = Math.min(Math.max(requested, minDelta), maxDelta)
 
-      content.sourceInMicros += delta
+      content.sourceInMicros += sourceSpanFor(segment, delta)
       segment.timelineStartMicros += delta
       return
     }
@@ -496,13 +502,17 @@ export const mutators = {
 
     if (content.kind !== 'text') {
       const source = requireSource(project, content.sourceId)
-      const maxDuration = source.durationMicros - content.sourceInMicros
+      const maxDuration = timelineSpanFor(
+        segment,
+        source.durationMicros - content.sourceInMicros,
+      )
       const duration = Math.min(
         Math.max(requestedDuration, MIN_SEGMENT_MICROS),
         maxDuration,
       )
 
-      content.sourceOutMicros = content.sourceInMicros + duration
+      content.sourceOutMicros =
+        content.sourceInMicros + sourceSpanFor(segment, duration)
       return
     }
 
@@ -795,6 +805,57 @@ export const mutators = {
     segment.transitionIn = { kind: args.kind, durationMicros: duration }
   },
 
+  /**
+   * Changes how fast a segment plays.
+   *
+   * The head stays put and the tail moves, so everything after it on the row
+   * ripples by the difference - a slower clip pushes what follows later rather
+   * than running over it. Nothing about the source range changes: the same
+   * footage plays, over more or less time.
+   */
+  setSegmentRate(project: Project, args: { segmentId: string; rate: number }): void {
+    const { track, segment, index } = requireSegment(project, args.segmentId)
+
+    if (segment.content.kind === 'text') {
+      throw new Error('Text has no source to play faster or slower.')
+    }
+
+    const rate = clampRate(args.rate)
+    const before = segmentDuration(segment)
+
+    segment.rate = rate
+    const after = segmentDuration(segment)
+
+    // Throwing anywhere below discards the draft, so the rate assigned above
+    // goes with it and the project is left exactly as it was.
+    if (after < MIN_SEGMENT_MICROS) {
+      throw new Error(
+        `At ${rate}x there would be nothing left of ${segment.id}.`,
+      )
+    }
+
+    // A transition needs both sides to be at least as long as it is, and this
+    // segment is one side of up to two of them.
+    const own = segment.transitionIn?.durationMicros ?? 0
+    const next = track.segments[index + 1]?.transitionIn?.durationMicros ?? 0
+
+    if (after < Math.max(own, next)) {
+      throw new Error(
+        `At ${rate}x, ${segment.id} would be shorter than the transition it` +
+          ` blends across. Remove the transition first.`,
+      )
+    }
+
+    if (rate === 1) delete segment.rate
+
+    const shift = after - before
+    if (shift !== 0 && !trackAllowsOverlap(track.kind)) {
+      for (let i = index + 1; i < track.segments.length; i++) {
+        track.segments[i]!.timelineStartMicros += shift
+      }
+    }
+  },
+
   /** Takes a transition off, giving back the time it was costing. */
   removeTransition(project: Project, segmentId: string): void {
     const { track, segment, index } = requireSegment(project, segmentId)
@@ -846,7 +907,7 @@ export const mutators = {
         }
         content.durationMicros = offset
       } else {
-        const cutAtSource = content.sourceInMicros + offset
+        const cutAtSource = sourceMicrosAt(segment, input.timelineMicros)
         secondContent = {
           ...(content as SoundContent),
           sourceInMicros: cutAtSource,
@@ -855,11 +916,15 @@ export const mutators = {
         content.sourceOutMicros = cutAtSource
       }
 
-      track.segments.splice(index + 1, 0, {
+      // Both halves keep the speed the whole was playing at.
+      const second: Segment = {
         id: input.newSegmentId,
         timelineStartMicros: input.timelineMicros,
         content: secondContent,
-      })
+      }
+      if (segment.rate !== undefined) second.rate = segment.rate
+
+      track.segments.splice(index + 1, 0, second)
       return
     }
   },
@@ -913,6 +978,12 @@ export const splitSegmentAt = (
   project: Project,
   input: SplitSegmentInput,
 ): Project => produce(project, (draft) => mutators.splitSegmentAt(draft, input))
+
+export const setSegmentRate = (
+  project: Project,
+  args: { segmentId: string; rate: number },
+): Project =>
+  produce(project, (draft) => mutators.setSegmentRate(draft, args))
 
 export const setTransition = (
   project: Project,
@@ -1021,12 +1092,10 @@ export function videoSegmentAt(
     )
     if (!segment) continue
 
-    const content = segment.content as VideoContent
     return {
       track,
       segment,
-      sourceMicros:
-        content.sourceInMicros + (timelineMicros - segment.timelineStartMicros),
+      sourceMicros: sourceMicrosAt(segment, timelineMicros),
     }
   }
 
@@ -1063,13 +1132,10 @@ export function visibleVideoSegmentsAt(
 
     for (let c = covering.length - 1; c >= 0; c--) {
       const segment = covering[c]!
-      const content = segment.content as VideoContent
       stack.push({
         track,
         segment,
-        sourceMicros:
-          content.sourceInMicros +
-          (timelineMicros - segment.timelineStartMicros),
+        sourceMicros: sourceMicrosAt(segment, timelineMicros),
       })
     }
 

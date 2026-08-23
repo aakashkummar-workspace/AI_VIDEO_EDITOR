@@ -371,6 +371,11 @@ input[type='color'] {
   border-right: 1px solid rgba(255, 255, 255, 0.35);
 }
 
+.rate-preset.is-current {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .shortcuts dl {
   display: grid;
   grid-template-columns: auto 1fr;
