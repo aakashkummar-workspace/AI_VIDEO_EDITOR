@@ -48,7 +48,9 @@ export default function Waveform({
     if (span <= 0) return
 
     const middle = canvas.height / 2
-    context.fillStyle = 'rgba(255, 255, 255, 0.55)'
+    // Nearly solid: at 55% on a mid-toned block the shape was technically
+    // being drawn and could not actually be read.
+    context.fillStyle = 'rgba(255, 255, 255, 0.9)'
 
     // One column per device pixel, each the loudest bucket it covers, so the
     // shape does not change as the timeline is zoomed.

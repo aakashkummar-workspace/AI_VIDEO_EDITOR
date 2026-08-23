@@ -204,7 +204,6 @@ export default function App() {
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
     null,
   )
-  const [overlayText, setOverlayText] = useState('Text')
   /**
    * Bumped whenever a file is handed to the source registry. The registry is
    * deliberately not store state, so nothing else would tell React that a
@@ -929,7 +928,7 @@ export default function App() {
         timelineStartMicros: currentMicros,
         content: {
           kind: 'text',
-          content: overlayText || 'Text',
+          content: 'Text',
           x: Math.round(width * 0.1),
           y: Math.round(height * 0.45),
           sizePx: Math.max(12, Math.round(height * 0.12)),
@@ -1270,6 +1269,18 @@ export default function App() {
         </section>
 
         <section className="panel">
+          <h2 className="panel-title">Text</h2>
+          <button
+            type="button"
+            data-testid="add-overlay"
+            onClick={addOverlayAtPlayhead}
+            disabled={!hasTimeline}
+          >
+            Add text at the playhead
+          </button>
+        </section>
+
+        <section className="panel">
           <h2 className="panel-title">Rows</h2>
           <div className="track-buttons">
             <button
@@ -1361,32 +1372,100 @@ export default function App() {
           </ul>
         </section>
 
-        <section className="panel">
-          <h2 className="panel-title">Text</h2>
+        <section
+          className="panel"
+          data-testid="storage-panel"
+          // False until whatever was saved has been read back and published.
+          // Anything reading the timeline before that is reading the empty
+          // state it starts in rather than the project.
+          data-restored={restored ? 'true' : 'false'}
+        >
+          <h2 className="panel-title">Saved</h2>
+          <p
+            className="panel-note"
+            data-testid="storage-state"
+            // The moment of the last write, so a test can wait for a NEW one
+            // rather than for the fact that a save has ever happened.
+            data-saved-at={savedAt ?? ''}
+          >
+            {savedAt === null
+              ? 'Nothing saved yet.'
+              : 'This project and its media are kept in this browser, and come'
+                + ' back when you return.'}
+          </p>
+          {usage && usage.quotaBytes > 0 && (
+            <p className="panel-note" data-testid="storage-usage">
+              Using {(usage.usageBytes / 1e6).toFixed(1)} MB of{' '}
+              {(usage.quotaBytes / 1e9).toFixed(1)} GB.
+            </p>
+          )}
+          <button
+            type="button"
+            data-testid="clear-storage"
+            onClick={() => {
+              void clearEverything()
+                .then(() => {
+                  setSavedAt(null)
+                  return storageUsage()
+                })
+                .then((next) => setUsage(next))
+                .catch((err) => setError(String(err)))
+            }}
+          >
+            Clear saved data
+          </button>
+        </section>
+
+        <section className="panel shortcuts">
+          <h2 className="panel-title">Shortcuts</h2>
+          <dl>
+            <dt>Space</dt>
+            <dd>play or pause</dd>
+            <dt>&#8592; &#8594;</dt>
+            <dd>step a frame; hold shift for a second</dd>
+            <dt>Home / End</dt>
+            <dd>jump to either end</dd>
+            <dt>Delete</dt>
+            <dd>remove what is selected</dd>
+            <dt>S</dt>
+            <dd>split at the playhead</dd>
+            <dt>Ctrl+Z</dt>
+            <dd>undo</dd>
+            <dt>Ctrl+Y</dt>
+            <dd>redo</dd>
+            <dt>Ctrl+scroll</dt>
+            <dd>zoom the timeline</dd>
+            <dt>drag</dt>
+            <dd>move a segment, or drop it on another row; drag an edge to trim</dd>
+            <dt>&#9671;</dt>
+            <dd>keyframe the value at the playhead</dd>
+            <dt>Save</dt>
+            <dd>write the timeline out as a draft</dd>
+          </dl>
+        </section>
+      </aside>
+      <aside className="inspector" data-testid="inspector">
+        {selectedSegment === undefined && (
+          <p className="panel-note" data-testid="inspector-empty">
+            Select something on the timeline to change it.
+          </p>
+        )}
+        {selectedText && selectedSegmentId && (
+          <section className="panel" data-testid="caption-panel">
+            <h2 className="panel-title">Caption</h2>
       <div className="overlay-form">
         <input
           type="text"
-          value={overlayText}
+          value={selectedText.content}
           data-testid="overlay-text"
           onBlur={() => useTimelineStore.getState().endCoalescing()}
-          onChange={(event) => {
-            setOverlayText(event.target.value)
-            if (selectedText && selectedSegmentId) {
-              useTimelineStore.getState().setTextStyle({
-                segmentId: selectedSegmentId,
-                content: event.target.value,
-              })
-            }
-          }}
-        />{' '}
-        <button
-          type="button"
-          data-testid="add-overlay"
-          onClick={addOverlayAtPlayhead}
-          disabled={!hasTimeline}
-        >
-          Add text
-        </button>
+          onChange={(event) =>
+            useTimelineStore.getState().setTextStyle({
+              segmentId: selectedSegmentId,
+              content: event.target.value,
+            })
+          }
+        />
         {selectedText && selectedSegmentId && (
           <>
             {' '}
@@ -1608,9 +1687,9 @@ export default function App() {
             </button>
           </>
         )}
-      </div>
-
-        </section>
+            </div>
+          </section>
+        )}
 
         {selectedSegment && selectedSegmentId && selectedDraws && (
           <section className="panel" data-testid="transform-panel">
@@ -1632,128 +1711,6 @@ export default function App() {
                 Remove every keyframe
               </button>
             )}
-          </section>
-        )}
-
-        {selectedSegment && selectedSegmentId && selectedHasSound && (
-          <section className="panel" data-testid="speed-panel">
-            <h2 className="panel-title">Speed</h2>
-            <div className="track-buttons">
-              {RATE_PRESETS.map((preset) => (
-                <button
-                  key={preset}
-                  type="button"
-                  className={
-                    segmentRate(selectedSegment) === preset
-                      ? 'rate-preset is-current'
-                      : 'rate-preset'
-                  }
-                  data-testid={`rate-${preset}`}
-                  onClick={() => {
-                    try {
-                      useTimelineStore
-                        .getState()
-                        .setSegmentRate({
-                          segmentId: selectedSegmentId,
-                          rate: preset,
-                        })
-                      setError(null)
-                    } catch (err) {
-                      setError(err instanceof Error ? err.message : String(err))
-                    }
-                  }}
-                >
-                  {preset}x
-                </button>
-              ))}
-            </div>
-            <p className="panel-note" data-testid="speed-summary">
-              {formatMicros(segmentDuration(selectedSegment))} on the timeline
-              {segmentRate(selectedSegment) !== 1
-                ? '. Sound is pitched by the same amount, as speeding up a tape would.'
-                : '.'}
-            </p>
-          </section>
-        )}
-
-        {selectedSegment && selectedSegmentId && canTransition && (
-          <section className="panel" data-testid="transition-panel">
-            <h2 className="panel-title">Transition in</h2>
-            <div className="transform-form">
-              <label className="transform-field">
-                <span className="transform-label">blend</span>
-                <select
-                  data-testid="transition-kind"
-                  value={selectedSegment.transitionIn?.kind ?? 'none'}
-                  onChange={(event) => {
-                    const store = useTimelineStore.getState()
-                    if (event.target.value === 'none') {
-                      store.removeTransition(selectedSegmentId)
-                      return
-                    }
-                    store.setTransition({
-                      segmentId: selectedSegmentId,
-                      kind: event.target.value as TransitionKind,
-                      durationMicros:
-                        selectedSegment.transitionIn?.durationMicros ??
-                        DEFAULT_TRANSITION_MICROS,
-                    })
-                  }}
-                >
-                  <option value="none">none</option>
-                  {TRANSITION_KINDS.map((kind) => (
-                    <option key={kind} value={kind}>
-                      {kind}
-                    </option>
-                  ))}
-                </select>
-                <span />
-              </label>
-
-              {selectedSegment.transitionIn && (
-                <label className="transform-field">
-                  <span className="transform-label">seconds</span>
-                  <input
-                    type="number"
-                    step={0.1}
-                    min={0.1}
-                    data-testid="transition-seconds"
-                    value={
-                      Math.round(
-                        (selectedSegment.transitionIn.durationMicros / 1e6) *
-                          100,
-                      ) / 100
-                    }
-                    onBlur={() => useTimelineStore.getState().endCoalescing()}
-                    onChange={(event) => {
-                      const seconds = Number(event.target.value)
-                      if (!Number.isFinite(seconds) || seconds <= 0) return
-
-                      useTimelineStore.getState().setTransition({
-                        segmentId: selectedSegmentId,
-                        kind: selectedSegment.transitionIn!.kind,
-                        durationMicros: Math.round(seconds * 1e6),
-                      })
-                    }}
-                  />
-                  <span />
-                </label>
-              )}
-            </div>
-            <p className="panel-note">
-              A blend costs time: the clip and everything after it move earlier
-              by its length, so the project gets that much shorter.
-            </p>
-          </section>
-        )}
-
-        {selectedSegment && selectedSegmentId && selectedHasSound && (
-          <section className="panel" data-testid="levels-panel">
-            <h2 className="panel-title">Audio</h2>
-            <div className="transform-form">{LEVEL_FIELDS.map(propertyField)}</div>
-            <p className="panel-note">
-              1 is the clip as recorded, 0 is silent. Keyframe it to fade.
-            </p>
           </section>
         )}
 
@@ -2037,78 +1994,130 @@ export default function App() {
           </section>
         )}
 
-        <section
-          className="panel"
-          data-testid="storage-panel"
-          // False until whatever was saved has been read back and published.
-          // Anything reading the timeline before that is reading the empty
-          // state it starts in rather than the project.
-          data-restored={restored ? 'true' : 'false'}
-        >
-          <h2 className="panel-title">Saved</h2>
-          <p
-            className="panel-note"
-            data-testid="storage-state"
-            // The moment of the last write, so a test can wait for a NEW one
-            // rather than for the fact that a save has ever happened.
-            data-saved-at={savedAt ?? ''}
-          >
-            {savedAt === null
-              ? 'Nothing saved yet.'
-              : 'This project and its media are kept in this browser, and come'
-                + ' back when you return.'}
-          </p>
-          {usage && usage.quotaBytes > 0 && (
-            <p className="panel-note" data-testid="storage-usage">
-              Using {(usage.usageBytes / 1e6).toFixed(1)} MB of{' '}
-              {(usage.quotaBytes / 1e9).toFixed(1)} GB.
+        {selectedSegment && selectedSegmentId && selectedHasSound && (
+          <section className="panel" data-testid="levels-panel">
+            <h2 className="panel-title">Audio</h2>
+            <div className="transform-form">{LEVEL_FIELDS.map(propertyField)}</div>
+            <p className="panel-note">
+              1 is the clip as recorded, 0 is silent. Keyframe it to fade.
             </p>
-          )}
-          <button
-            type="button"
-            data-testid="clear-storage"
-            onClick={() => {
-              void clearEverything()
-                .then(() => {
-                  setSavedAt(null)
-                  return storageUsage()
-                })
-                .then((next) => setUsage(next))
-                .catch((err) => setError(String(err)))
-            }}
-          >
-            Clear saved data
-          </button>
-        </section>
+          </section>
+        )}
 
-        <section className="panel shortcuts">
-          <h2 className="panel-title">Shortcuts</h2>
-          <dl>
-            <dt>Space</dt>
-            <dd>play or pause</dd>
-            <dt>&#8592; &#8594;</dt>
-            <dd>step a frame; hold shift for a second</dd>
-            <dt>Home / End</dt>
-            <dd>jump to either end</dd>
-            <dt>Delete</dt>
-            <dd>remove what is selected</dd>
-            <dt>S</dt>
-            <dd>split at the playhead</dd>
-            <dt>Ctrl+Z</dt>
-            <dd>undo</dd>
-            <dt>Ctrl+Y</dt>
-            <dd>redo</dd>
-            <dt>Ctrl+scroll</dt>
-            <dd>zoom the timeline</dd>
-            <dt>drag</dt>
-            <dd>move a segment, or drop it on another row; drag an edge to trim</dd>
-            <dt>&#9671;</dt>
-            <dd>keyframe the value at the playhead</dd>
-            <dt>Save</dt>
-            <dd>write the timeline out as a draft</dd>
-          </dl>
-        </section>
+        {selectedSegment && selectedSegmentId && selectedHasSound && (
+          <section className="panel" data-testid="speed-panel">
+            <h2 className="panel-title">Speed</h2>
+            <div className="track-buttons">
+              {RATE_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  className={
+                    segmentRate(selectedSegment) === preset
+                      ? 'rate-preset is-current'
+                      : 'rate-preset'
+                  }
+                  data-testid={`rate-${preset}`}
+                  onClick={() => {
+                    try {
+                      useTimelineStore
+                        .getState()
+                        .setSegmentRate({
+                          segmentId: selectedSegmentId,
+                          rate: preset,
+                        })
+                      setError(null)
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : String(err))
+                    }
+                  }}
+                >
+                  {preset}x
+                </button>
+              ))}
+            </div>
+            <p className="panel-note" data-testid="speed-summary">
+              {formatMicros(segmentDuration(selectedSegment))} on the timeline
+              {segmentRate(selectedSegment) !== 1
+                ? '. Sound is pitched by the same amount, as speeding up a tape would.'
+                : '.'}
+            </p>
+          </section>
+        )}
+
+        {selectedSegment && selectedSegmentId && canTransition && (
+          <section className="panel" data-testid="transition-panel">
+            <h2 className="panel-title">Transition in</h2>
+            <div className="transform-form">
+              <label className="transform-field">
+                <span className="transform-label">blend</span>
+                <select
+                  data-testid="transition-kind"
+                  value={selectedSegment.transitionIn?.kind ?? 'none'}
+                  onChange={(event) => {
+                    const store = useTimelineStore.getState()
+                    if (event.target.value === 'none') {
+                      store.removeTransition(selectedSegmentId)
+                      return
+                    }
+                    store.setTransition({
+                      segmentId: selectedSegmentId,
+                      kind: event.target.value as TransitionKind,
+                      durationMicros:
+                        selectedSegment.transitionIn?.durationMicros ??
+                        DEFAULT_TRANSITION_MICROS,
+                    })
+                  }}
+                >
+                  <option value="none">none</option>
+                  {TRANSITION_KINDS.map((kind) => (
+                    <option key={kind} value={kind}>
+                      {kind}
+                    </option>
+                  ))}
+                </select>
+                <span />
+              </label>
+
+              {selectedSegment.transitionIn && (
+                <label className="transform-field">
+                  <span className="transform-label">seconds</span>
+                  <input
+                    type="number"
+                    step={0.1}
+                    min={0.1}
+                    data-testid="transition-seconds"
+                    value={
+                      Math.round(
+                        (selectedSegment.transitionIn.durationMicros / 1e6) *
+                          100,
+                      ) / 100
+                    }
+                    onBlur={() => useTimelineStore.getState().endCoalescing()}
+                    onChange={(event) => {
+                      const seconds = Number(event.target.value)
+                      if (!Number.isFinite(seconds) || seconds <= 0) return
+
+                      useTimelineStore.getState().setTransition({
+                        segmentId: selectedSegmentId,
+                        kind: selectedSegment.transitionIn!.kind,
+                        durationMicros: Math.round(seconds * 1e6),
+                      })
+                    }}
+                  />
+                  <span />
+                </label>
+              )}
+            </div>
+            <p className="panel-note">
+              A blend costs time: the clip and everything after it move earlier
+              by its length, so the project gets that much shorter.
+            </p>
+          </section>
+        )}
+
       </aside>
+
 
       <main className="stage">
         <div className="stage-status">

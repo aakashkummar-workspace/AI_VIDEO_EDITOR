@@ -116,7 +116,7 @@ test('handing the file back clears the warning and plays again', async ({
   await expect(page.getByTestId('clip')).toBeVisible()
 
   // The timeline is whole again, so the transport is usable.
-  await expect(page.getByRole('button', { name: 'Play' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled()
 })
 
 test('relinking refuses a file too short for the timeline', async ({ page }) => {

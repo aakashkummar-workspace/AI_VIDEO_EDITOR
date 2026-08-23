@@ -87,13 +87,13 @@ test('stepping stops at either end rather than running off', async ({
 })
 
 test('space plays and pauses', async ({ page }) => {
-  await expect(page.getByRole('button', { name: 'Pause' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeDisabled()
 
   await page.keyboard.press('Space')
-  await expect(page.getByRole('button', { name: 'Pause' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeEnabled()
 
   await page.keyboard.press('Space')
-  await expect(page.getByRole('button', { name: 'Pause' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeDisabled()
 })
 
 test('space does not scroll the page', async ({ page }) => {
@@ -141,6 +141,11 @@ test('the shortcuts stay out of the way while a field has focus', async ({
 }) => {
   const before = await currentMicros(page)
 
+  // The caption field lives in the inspector now, so there has to be a
+  // caption selected for it to exist at all.
+  await page.getByTestId('add-overlay').click()
+  await expect(page.getByTestId('overlay-block')).toHaveCount(1)
+
   const field = page.getByTestId('overlay-text')
   await field.click()
   await field.fill('')
@@ -148,7 +153,7 @@ test('the shortcuts stay out of the way while a field has focus', async ({
 
   // The space went into the caption, not into the transport.
   expect(await field.inputValue()).toBe('a b')
-  await expect(page.getByRole('button', { name: 'Pause' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeDisabled()
 
   await page.keyboard.press('ArrowLeft')
   expect(await currentMicros(page)).toBe(before)

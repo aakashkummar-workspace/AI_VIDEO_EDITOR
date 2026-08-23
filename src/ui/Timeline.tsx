@@ -176,6 +176,11 @@ export default function Timeline({
             data-track-id={track.id}
             data-track-kind={track.kind}
           >
+            {/* Which row this is, pinned to the left of the strip so it stays
+                put while the timeline scrolls under it. */}
+            <span className="timeline-track-label" data-testid="track-label">
+              {track.kind}
+            </span>
             {track.segments.map((segment) => {
               const selected = segment.id === selectedId
               const classes = ['timeline-clip']

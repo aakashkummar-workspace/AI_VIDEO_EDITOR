@@ -70,12 +70,37 @@ input[type='color'] {
   padding: 2px;
 }
 
-/* Layout: media left, canvas centre, timeline docked along the bottom. */
+/*
+ * Layout: the project on the left, the picture in the middle, whatever is
+ * selected on the right, and the timeline docked along the bottom.
+ *
+ * The split matters more than it looks. Every control used to live in one
+ * column, so changing the clip you had just clicked meant scrolling past the
+ * media list, the export settings and the row list to reach it. Scope is now
+ * the thing that decides which side a panel is on: left is the project, right
+ * is the selection.
+ */
 .app {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: 240px minmax(0, 1fr) 300px;
   grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100vh;
+}
+
+/* Narrow windows drop the inspector under the picture rather than squeezing
+   all three columns until none of them is usable. */
+@media (max-width: 1100px) {
+  .app {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+
+  .inspector {
+    grid-column: 2;
+    grid-row: 3;
+    max-height: 240px;
+    border-left: none;
+    border-top: 1px solid var(--line);
+  }
 }
 
 .topbar {
@@ -396,6 +421,31 @@ input[type='color'] {
   opacity: 0.9;
 }
 
+.timeline-track-label {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  display: inline-block;
+  padding: 1px 5px;
+  /* Pinned, so the band the label sits in has a size that can be reasoned
+     about rather than whatever the default leading works out to. */
+  font-size: 9px;
+  line-height: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-panel) 85%, transparent);
+  border-radius: 0 0 4px 0;
+  pointer-events: none;
+}
+
+/* Sections in the inspector run together otherwise: there are six of them and
+   they are all grids of small fields. */
+.inspector .panel + .panel {
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
 .shortcuts dl {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -413,6 +463,28 @@ input[type='color'] {
 .shortcuts dd {
   margin: 0;
   color: var(--text-dim);
+}
+
+.inspector {
+  grid-row: 2;
+  grid-column: 3;
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* The inspector is where the fiddly controls live, so its fields get the room
+   the shared sidebar could not give them. */
+.inspector .transform-field {
+  grid-template-columns: 1fr 76px 22px;
+}
+
+.inspector .effect-row {
+  grid-template-columns: 1fr 66px 22px 18px 18px 20px;
 }
 
 .stage {
@@ -465,6 +537,10 @@ input[type='color'] {
   padding-bottom: 8px;
   background: var(--bg-panel);
   border-top: 1px solid var(--line);
+  /* Rows are added freely, so the dock has to stop growing at some point or
+     it eats the picture it is meant to be cutting. */
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 .timeline {
@@ -500,12 +576,15 @@ input[type='color'] {
 
 .timeline-track {
   position: relative;
-  height: 46px;
+  /* Tall enough for a label band above the blocks: a row that says what it is
+     beats one you have to work out from its colour. */
+  height: 56px;
 }
 
 .timeline-clip {
   position: absolute;
-  top: 5px;
+  /* Below the label band. */
+  top: 16px;
   bottom: 5px;
   background: linear-gradient(180deg, var(--clip) 0%, #294060 100%);
   border: 1px solid var(--clip-edge);

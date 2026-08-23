@@ -120,7 +120,7 @@ test('the restored project can actually be played', async ({ page }) => {
   await page.getByTestId('timeline').click({ position: { x: 120, y: 30 } })
   await expect.poll(() => canvasHasPicture(page)).toBe(true)
 
-  await expect(page.getByRole('button', { name: 'Play' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled()
 })
 
 test('edits made after a reload are saved in their turn', async ({ page }) => {

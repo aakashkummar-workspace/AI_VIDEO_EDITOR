@@ -171,6 +171,15 @@
 - A mask is cut on a SCRATCH LAYER, never in place: `destination-in` on
   the composition would take the rows underneath with it. The feather is
   a blur on the mask shape, not a gradient per side.
+- SCOPE decides which column a control is in: the left column is the
+  project, the right one is whatever is selected. A panel that belongs
+  to neither - an authoring action like "add a caption" - is a project
+  control, not a property of the selection. Adding a panel to whichever
+  column is nearest is how the sidebar became thirteen panels deep.
+- The inspector offers only what applies: sound has no transform, a
+  caption has no volume or speed. `tests/layout.spec.ts` says where
+  each panel belongs, so a new one cannot quietly land in the wrong
+  column.
 - A waveform belongs to the SOURCE, not to the segment. Measure once
   per file and re-slice it for each block; never measure per segment.
   The request is not guarded by the generation counter, because a
