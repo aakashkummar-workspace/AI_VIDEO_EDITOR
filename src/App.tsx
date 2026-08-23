@@ -58,6 +58,7 @@ import {
   isAnimated,
   propertyAt,
   segmentDuration,
+  segmentLabel,
   segmentRate,
   soundContent,
   sourceHasVideo,
@@ -187,6 +188,94 @@ function trackEndMicros(project: Project, trackId: string): number {
   )
 }
 
+/*
+ * Line art rather than emoji: an emoji is a font, and which one the machine has
+ * decides how big it draws and whether it comes out in somebody else's colours.
+ * These inherit currentColor and follow the theme.
+ */
+function FilmGlyph() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={1.5}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M3 9h18M3 15h18M8 5v14M16 5v14" />
+    </svg>
+  )
+}
+
+function WaveGlyph() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={1.6} strokeLinecap="round">
+      <path d="M4 12h2l2-6 3 14 3-11 2 3h4" />
+    </svg>
+  )
+}
+
+function SplitGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={1.7} strokeLinecap="round">
+      <path d="M6 4v16M18 4v16M6 12h12" />
+    </svg>
+  )
+}
+
+function DuplicateGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={1.7} strokeLinecap="round"
+      strokeLinejoin="round">
+      <rect x="8" y="8" width="12" height="12" rx="2" />
+      <path d="M4 16V6a2 2 0 012-2h10" />
+    </svg>
+  )
+}
+
+function TransitionGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={1.7} strokeLinecap="round">
+      <path d="M4 12h16M14 6l6 6-6 6" />
+    </svg>
+  )
+}
+
+function TextGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={1.7} strokeLinecap="round">
+      <path d="M5 7h14M12 7v12" />
+    </svg>
+  )
+}
+
+function TrashGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={1.7} strokeLinecap="round"
+      strokeLinejoin="round">
+      <path d="M6 7h12l-1 13H7L6 7zM9 7V4h6v3" />
+    </svg>
+  )
+}
+
+/**
+ * The aspects of a selection, one per tab.
+ *
+ * "clip" is offered for anything at all, which is what keeps speed reachable
+ * on a piece of music: an audio segment draws nothing, so it has no transform
+ * and no compositing, but it still has a rate.
+ */
+type InspectorTab = 'clip' | 'audio' | 'effects' | 'text'
+
+const TAB_LABELS: Record<InspectorTab, string> = {
+  clip: 'Clip',
+  audio: 'Audio',
+  effects: 'Effects',
+  text: 'Text',
+}
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const playerRef = useRef<ReturnType<typeof createPlayer> | null>(null)
@@ -200,6 +289,7 @@ export default function App() {
   const [exportPercent, setExportPercent] = useState<number | null>(null)
   /** What the timeline and canvas show mid-drag, before anything is committed. */
   const [previewProject, setPreviewProject] = useState<Project | null>(null)
+  const [requestedTab, setRequestedTab] = useState<InspectorTab>('clip')
   const [pixelsPerSecond, setPixelsPerSecond] = useState(
     DEFAULT_PIXELS_PER_SECOND,
   )
@@ -1071,6 +1161,72 @@ export default function App() {
     selectedTrack.kind !== 'text' &&
     selectedIndex > 0
 
+  /*
+   * A new selection opens at its own most important aspect: a caption at its
+   * words, anything else at the clip. Within one selection the tab you picked
+   * stays picked - it is only a CHANGE of selection that re-homes it, because
+   * a caption whose words you cannot see is a caption you cannot edit.
+   *
+   * Keyed on the id alone, deliberately. What the segment IS comes from the
+   * same render, so listing it here would re-home the tab on every edit to it,
+   * which is the opposite of what this is for.
+   */
+  useEffect(() => {
+    setRequestedTab(selectedText ? 'text' : 'clip')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSegmentId])
+
+  /**
+   * Which tabs this selection has anything behind. The inspector offers only
+   * what applies, so a tab with nothing in it is not a disabled tab - it is
+   * not there at all.
+   */
+  const availableTabs: InspectorTab[] = selectedSegment
+    ? ([
+        'clip',
+        selectedHasSound ? 'audio' : undefined,
+        'effects',
+        selectedText ? 'text' : undefined,
+      ].filter(Boolean) as InspectorTab[])
+    : []
+
+  // The last line of defence: a tab the selection does not have cannot be the
+  // active one, whatever was asked for.
+  const activeTab: InspectorTab = availableTabs.includes(requestedTab)
+    ? requestedTab
+    : 'clip'
+
+  /** What the action strip calls the selection - the block's own name. */
+  const selectedName = selectedSegment
+    ? segmentLabel(displayProject, selectedSegment) || 'caption'
+    : undefined
+
+  function splitAtPlayhead() {
+    useTimelineStore.getState().splitSegmentAt({
+      timelineMicros: currentMicros,
+      newSegmentId: crypto.randomUUID(),
+    })
+  }
+
+  /**
+   * The verb form of a transition: on or off, at the length the panel would
+   * have given it. Which KIND it is stays a field in the inspector - a verb
+   * that also carried settings would be a second place to set them.
+   */
+  function toggleTransition() {
+    if (!selectedSegmentId) return
+    const store = useTimelineStore.getState()
+    if (selectedSegment?.transitionIn) {
+      store.removeTransition(selectedSegmentId)
+      return
+    }
+    store.setTransition({
+      segmentId: selectedSegmentId,
+      kind: 'crossfade',
+      durationMicros: DEFAULT_TRANSITION_MICROS,
+    })
+  }
+
   /** Zooms so the whole timeline fits the visible strip. */
   function fitZoom() {
     const strip = document.querySelector('[data-testid=timeline-scroll]')
@@ -1097,13 +1253,6 @@ export default function App() {
           disabled={!playing}
         >
           Pause
-        </button>{' '}
-        <button
-          type="button"
-          onClick={() => playerRef.current?.exportMp4()}
-          disabled={!hasTimeline || exportPercent !== null}
-        >
-          Export
         </button>{' '}
         <span data-testid="time">
           {formatMicros(currentMicros)} / {formatMicros(duration)}
@@ -1134,6 +1283,14 @@ export default function App() {
         <ThemeSelect />
 
         <div className="draft-controls">
+          <button
+            type="button"
+            className="export-button"
+            onClick={() => playerRef.current?.exportMp4()}
+            disabled={!hasTimeline || exportPercent !== null}
+          >
+            Export
+          </button>{' '}
           <button type="button" data-testid="save-draft" onClick={saveDraft}>
             Save
           </button>{' '}
@@ -1159,28 +1316,36 @@ export default function App() {
             onChange={handleFileChange}
             className="file-input"
           />
-      {sources.length > 0 && (
-        <ul className="media-list" data-testid="media-list">
-          {sources.map((source) => (
-            <li key={source.id} data-testid="media-item">
-              <span data-testid="media-name">{source.name}</span>{' '}
-              <span className="media-meta">
-                {sourceHasVideo(source)
-                  ? `${source.width} x ${source.height}`
-                  : 'audio only'}
-              </span>{' '}
-              <button
-                type="button"
-                data-testid="add-to-timeline"
-                data-source-id={source.id}
-                onClick={() => appendClip(source.id)}
-              >
-                Add to timeline
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+          {sources.length > 0 && (
+            <ul className="media-list" data-testid="media-list">
+              {sources.map((source) => (
+                <li key={source.id} data-testid="media-item">
+                  <button
+                    type="button"
+                    className="media-tile"
+                    title={`Add ${source.name} to the timeline`}
+                    data-testid="add-to-timeline"
+                    data-source-id={source.id}
+                    onClick={() => appendClip(source.id)}
+                  >
+                    <span
+                      className="media-thumb"
+                      data-kind={sourceHasVideo(source) ? 'video' : 'audio'}
+                      aria-hidden="true"
+                    >
+                      {sourceHasVideo(source) ? <FilmGlyph /> : <WaveGlyph />}
+                    </span>
+                    <span data-testid="media-name">{source.name}</span>
+                    <span className="media-meta">
+                      {sourceHasVideo(source)
+                        ? `${source.width} x ${source.height}`
+                        : 'audio only'}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
 
         </section>
 
@@ -1273,18 +1438,6 @@ export default function App() {
         </section>
 
         <section className="panel">
-          <h2 className="panel-title">Text</h2>
-          <button
-            type="button"
-            data-testid="add-overlay"
-            onClick={addOverlayAtPlayhead}
-            disabled={!hasTimeline}
-          >
-            Add text at the playhead
-          </button>
-        </section>
-
-        <section className="panel">
           <h2 className="panel-title">Rows</h2>
           <div className="track-buttons">
             <button
@@ -1292,21 +1445,21 @@ export default function App() {
               data-testid="add-video-track"
               onClick={() => addTrack('video')}
             >
-              + video row
+              + video
             </button>{' '}
             <button
               type="button"
               data-testid="add-text-track"
               onClick={() => addTrack('text')}
             >
-              + text row
+              + text
             </button>{' '}
             <button
               type="button"
               data-testid="add-audio-track"
               onClick={() => addTrack('audio')}
             >
-              + audio row
+              + audio
             </button>
           </div>
           <ul className="track-list" data-testid="track-list">
@@ -1421,7 +1574,10 @@ export default function App() {
         </section>
 
         <section className="panel shortcuts">
-          <h2 className="panel-title">Shortcuts</h2>
+          <details>
+            <summary>
+              <h2 className="panel-title">Shortcuts</h2>
+            </summary>
           <dl>
             <dt>Space</dt>
             <dd>play or pause</dd>
@@ -1446,15 +1602,34 @@ export default function App() {
             <dt>Save</dt>
             <dd>write the timeline out as a draft</dd>
           </dl>
+          </details>
         </section>
       </aside>
       <aside className="inspector" data-testid="inspector">
+        {availableTabs.length > 0 && (
+          <div className="inspector-tabs" role="tablist">
+            {availableTabs.map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                role="tab"
+                data-testid={`tab-${tab}`}
+                aria-selected={tab === activeTab}
+                onClick={() => setRequestedTab(tab)}
+              >
+                {TAB_LABELS[tab]}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="inspector-body">
         {selectedSegment === undefined && (
           <p className="panel-note" data-testid="inspector-empty">
             Select something on the timeline to change it.
           </p>
         )}
-        {selectedText && selectedSegmentId && (
+        {selectedText && selectedSegmentId && activeTab === 'text' && (
           <section className="panel" data-testid="caption-panel">
             <h2 className="panel-title">Caption</h2>
       <div className="overlay-form">
@@ -1695,7 +1870,7 @@ export default function App() {
           </section>
         )}
 
-        {selectedSegment && selectedSegmentId && selectedDraws && (
+        {selectedSegment && selectedSegmentId && selectedDraws && activeTab === 'clip' && (
           <section className="panel" data-testid="transform-panel">
             <h2 className="panel-title">Transform</h2>
             <div className="transform-form">
@@ -1718,7 +1893,7 @@ export default function App() {
           </section>
         )}
 
-        {selectedSegment && selectedSegmentId && selectedDraws && (
+        {selectedSegment && selectedSegmentId && selectedDraws && activeTab === 'clip' && (
           <section className="panel" data-testid="compositing-panel">
             <h2 className="panel-title">Compositing</h2>
 
@@ -1914,7 +2089,7 @@ export default function App() {
           </section>
         )}
 
-        {selectedSegment && selectedSegmentId && (
+        {selectedSegment && selectedSegmentId && activeTab === 'effects' && (
           <section className="panel" data-testid="effects-panel">
             <h2 className="panel-title">Effects</h2>
 
@@ -2077,7 +2252,7 @@ export default function App() {
           </section>
         )}
 
-        {selectedSegment && selectedSegmentId && selectedHasSound && (
+        {selectedSegment && selectedSegmentId && selectedHasSound && activeTab === 'audio' && (
           <section className="panel" data-testid="levels-panel">
             <h2 className="panel-title">Audio</h2>
             <div className="transform-form">{LEVEL_FIELDS.map(propertyField)}</div>
@@ -2087,7 +2262,7 @@ export default function App() {
           </section>
         )}
 
-        {selectedSegment && selectedSegmentId && selectedHasSound && (
+        {selectedSegment && selectedSegmentId && selectedHasSound && activeTab === 'clip' && (
           <section className="panel" data-testid="speed-panel">
             <h2 className="panel-title">Speed</h2>
             <div className="track-buttons">
@@ -2128,7 +2303,7 @@ export default function App() {
           </section>
         )}
 
-        {selectedSegment && selectedSegmentId && canTransition && (
+        {selectedSegment && selectedSegmentId && canTransition && activeTab === 'clip' && (
           <section className="panel" data-testid="transition-panel">
             <h2 className="panel-title">Transition in</h2>
             <div className="transform-form">
@@ -2198,7 +2373,7 @@ export default function App() {
             </p>
           </section>
         )}
-
+        </div>
       </aside>
 
 
@@ -2220,6 +2395,92 @@ export default function App() {
           <canvas ref={canvasRef} />
         </div>
       </main>
+
+      <div className="actions" data-testid="actions">
+        <div className="actions-subject">
+          {selectedSegment ? (
+            <>
+              <span
+                className="actions-swatch"
+                data-kind={selectedSegment.content.kind}
+                aria-hidden="true"
+              />
+              <span className="actions-name" data-testid="actions-name">
+                {selectedName}
+              </span>
+              <span className="actions-range">
+                {formatMicros(selectedSegment.timelineStartMicros)}
+                {'–'}
+                {formatMicros(
+                  selectedSegment.timelineStartMicros +
+                    segmentDuration(selectedSegment),
+                )}
+              </span>
+            </>
+          ) : (
+            <span className="actions-empty">Nothing selected</span>
+          )}
+        </div>
+
+        <div className="actions-verbs">
+          <button
+            type="button"
+            data-testid="verb-split"
+            onClick={splitAtPlayhead}
+            disabled={!selectedSegmentId}
+          >
+            <SplitGlyph />
+            Split
+          </button>
+          <button
+            type="button"
+            data-testid="verb-duplicate"
+            onClick={() => {
+              if (!selectedSegmentId) return
+              useTimelineStore.getState().duplicateSegment({
+                segmentId: selectedSegmentId,
+                newSegmentId: crypto.randomUUID(),
+              })
+            }}
+            disabled={!selectedSegmentId}
+          >
+            <DuplicateGlyph />
+            Duplicate
+          </button>
+          <button
+            type="button"
+            data-testid="verb-transition"
+            className={selectedSegment?.transitionIn ? 'is-current' : undefined}
+            onClick={toggleTransition}
+            disabled={!canTransition}
+          >
+            <TransitionGlyph />
+            Transition
+          </button>
+          <button
+            type="button"
+            data-testid="add-overlay"
+            onClick={addOverlayAtPlayhead}
+            disabled={!hasTimeline}
+          >
+            <TextGlyph />
+            Add text
+          </button>
+          <button
+            type="button"
+            data-testid="verb-delete"
+            onClick={() => {
+              if (!selectedSegmentId) return
+              useTimelineStore.getState().removeSegment(selectedSegmentId)
+              setSelectedSegmentId(null)
+            }}
+            disabled={!selectedSegmentId}
+          >
+            <TrashGlyph />
+            Delete
+          </button>
+        </div>
+      </div>
 
       <footer className="dock">
         <Timeline

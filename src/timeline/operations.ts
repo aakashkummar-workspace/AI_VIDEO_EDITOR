@@ -234,6 +234,12 @@ export type TrimInput = {
   timelineMicros: number
 }
 
+export type DuplicateSegmentInput = {
+  segmentId: string
+  /** Id for the copy. Passed in so the operation stays deterministic. */
+  newSegmentId: string
+}
+
 export type SplitSegmentInput = {
   timelineMicros: number
   /** Id for the second half. Passed in so the operation stays deterministic. */
@@ -1059,6 +1065,51 @@ export const mutators = {
   },
 
   /**
+   * Puts a copy of a segment immediately after it.
+   *
+   * A packed row has no room for one, so everything after moves along by the
+   * copy's length and the project gets that much longer - the mirror of what
+   * applying a transition does, which pulls everything earlier. A row that
+   * allows overlap needs no such thing.
+   */
+  duplicateSegment(project: Project, input: DuplicateSegmentInput): void {
+    assertSegmentIdFree(project, input.newSegmentId)
+
+    for (const track of project.tracks) {
+      const index = track.segments.findIndex(
+        (segment) => segment.id === input.segmentId,
+      )
+      if (index < 0) continue
+
+      const segment = track.segments[index]!
+      const length = segmentDuration(segment)
+
+      // Timeline state is plain JSON, so a round trip through it is a complete
+      // copy: keyframes, effects and all, sharing nothing with the original.
+      const copy = JSON.parse(JSON.stringify(segment)) as Segment
+      copy.id = input.newSegmentId
+      copy.timelineStartMicros = segmentEndMicros(segment)
+
+      // The copy is placed AT the original's end rather than reaching back
+      // into it, so it blends across nothing and carries no transition. One
+      // can be applied to it afterwards like any other.
+      delete copy.transitionIn
+
+      if (!trackAllowsOverlap(track.kind)) {
+        for (const later of track.segments.slice(index + 1)) {
+          later.timelineStartMicros += length
+        }
+      }
+
+      assertNoOverlap(track, copy)
+      track.segments.splice(index + 1, 0, copy)
+      return
+    }
+
+    throw new Error(`No segment with id ${input.segmentId}.`)
+  },
+
+  /**
    * Cuts the segment under `timelineMicros` in two.
    *
    * A cut in empty space, or exactly on a boundary, is a no-op: neither half
@@ -1162,6 +1213,12 @@ export const trimSegmentEnd = (project: Project, args: TrimInput): Project =>
 
 export const setTextStyle = (project: Project, args: TextStyleInput): Project =>
   produce(project, (draft) => mutators.setTextStyle(draft, args))
+
+export const duplicateSegment = (
+  project: Project,
+  input: DuplicateSegmentInput,
+): Project =>
+  produce(project, (draft) => mutators.duplicateSegment(draft, input))
 
 export const splitSegmentAt = (
   project: Project,

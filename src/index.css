@@ -149,8 +149,12 @@ input[type='color'] {
  */
 .app {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) 300px;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-columns: 218px minmax(0, 1fr) 282px;
+  /* Four bands: the transport, the work, the verbs for what is selected, and
+     the timeline. The verbs get their own row rather than a corner of one of
+     the columns, because they act on the selection and the selection is not
+     something either column owns. */
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   height: 100vh;
 }
 
@@ -158,7 +162,8 @@ input[type='color'] {
    all three columns until none of them is usable. */
 @media (max-width: 1100px) {
   .app {
-    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-columns: 218px minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto auto auto;
   }
 
   .inspector {
@@ -167,6 +172,14 @@ input[type='color'] {
     max-height: 240px;
     border-left: none;
     border-top: 1px solid var(--line);
+  }
+
+  .actions {
+    grid-row: 4;
+  }
+
+  .dock {
+    grid-row: 5;
   }
 }
 
@@ -231,36 +244,64 @@ input[type='color'] {
   margin-bottom: 8px;
 }
 
+/*
+ * Two up rather than a list. A name on its own line was costing the column its
+ * whole width per file, which is what pushed everything below the media out of
+ * sight - the reason for splitting the columns in the first place.
+ */
 .media-list {
   list-style: none;
   padding: 0;
   margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
 }
 
-.media-list li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
+.media-tile {
+  display: block;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
   background: var(--bg-raised);
   border: 1px solid var(--line-soft);
   border-radius: 6px;
 }
 
-.media-list [data-testid='media-name'] {
-  flex: 1 1 100%;
+/*
+ * A band in the colour of the row this file will land on, not a poster frame.
+ * Standing in for footage with a gradient would be a picture of nothing, and
+ * the kind is what you are actually picking between here.
+ */
+.media-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  color: var(--clip-text);
+  background: linear-gradient(140deg, var(--clip-edge), var(--clip));
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.media-thumb[data-kind='audio'] {
+  background: linear-gradient(140deg, var(--audio-edge), var(--audio));
+}
+
+.media-tile [data-testid='media-name'] {
+  display: block;
+  padding: 4px 6px 0;
   overflow: hidden;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .media-meta {
+  display: block;
+  padding: 0 6px 4px;
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .overlay-form {
@@ -382,6 +423,13 @@ input[type='color'] {
 
 /* Next to Save and Open rather than in a panel: it belongs to the application,
    and both columns below are about the project. */
+/* The one outcome the whole application is for, so it is the one button that
+   carries the accent. */
+.export-button {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .theme-select {
   display: inline-flex;
   align-items: center;
@@ -423,8 +471,39 @@ input[type='color'] {
 
 .track-buttons {
   display: flex;
-  gap: 6px;
+  gap: 4px;
   margin-bottom: 6px;
+}
+
+.track-buttons button {
+  flex: 1;
+  padding: 4px 2px;
+  font-size: 11px;
+}
+
+/* Pinned to the foot: it is a statement about the browser rather than a
+   control, and it should not sit between two things that are. */
+.sidebar [data-testid='storage-panel'] {
+  margin-top: auto;
+}
+
+/* A reference list, not a control. Twelve rows of it were the length of the
+   column; collapsed, it is one. */
+.shortcuts summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.shortcuts summary::-webkit-details-marker {
+  display: none;
+}
+
+.shortcuts summary .panel-title {
+  margin: 0;
+}
+
+.shortcuts dl {
+  margin-top: 8px;
 }
 
 .track-list {
@@ -527,7 +606,7 @@ input[type='color'] {
 
 /* Sections in the inspector run together otherwise: there are six of them and
    they are all grids of small fields. */
-.inspector .panel + .panel {
+.inspector-body .panel + .panel {
   padding-top: 12px;
   border-top: 1px solid var(--line-soft);
 }
@@ -554,10 +633,53 @@ input[type='color'] {
 .inspector {
   grid-row: 2;
   grid-column: 3;
-  overflow-y: auto;
-  padding: 12px;
+  min-height: 0;
+  padding: 0;
   background: var(--bg-panel);
   border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+}
+
+/*
+ * The six panels used to be one scroll. Tabs are what stops the column being a
+ * list of everything the application can do to anything - each one holds the
+ * panels for one aspect, and a tab that has nothing to offer this selection is
+ * not offered at all.
+ */
+.inspector-tabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 0 5px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.inspector-tabs button {
+  padding: 7px 11px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+}
+
+.inspector-tabs button:hover:not(:disabled) {
+  color: var(--text);
+  background: transparent;
+}
+
+.inspector-tabs button[aria-selected='true'] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.inspector-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -622,14 +744,97 @@ input[type='color'] {
   box-shadow: 0 2px 18px var(--stage-shadow);
 }
 
+/*
+ * The verbs. Everything here ACTS on what is selected - nothing here is also a
+ * field in the inspector, or the two would disagree about which is the real
+ * one. What a segment IS lives on the right; what you can DO to it lives here.
+ */
+.actions {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 6px 14px;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--line);
+}
+
+.actions-subject {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 168px;
+  font-size: 11px;
+}
+
+.actions-empty {
+  color: var(--text-dim);
+}
+
+/* Which row it came off, in the colour that row uses on the timeline. */
+.actions-swatch {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 2px;
+  background: var(--clip-edge);
+}
+
+.actions-swatch[data-kind='text'] {
+  background: var(--overlay-edge);
+}
+
+.actions-swatch[data-kind='audio'] {
+  background: var(--audio-edge);
+}
+
+.actions-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions-range {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.actions-verbs {
+  display: flex;
+  gap: 5px;
+}
+
+.actions-verbs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.actions-verbs button.is-current {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.actions-verbs svg {
+  flex: none;
+}
+
 .dock {
   grid-column: 1 / -1;
+  grid-row: 4;
   padding-bottom: 8px;
   background: var(--bg-panel);
   border-top: 1px solid var(--line);
   /* Rows are added freely, so the dock has to stop growing at some point or
      it eats the picture it is meant to be cutting. */
-  max-height: 40vh;
+  max-height: 34vh;
   overflow-y: auto;
 }
 

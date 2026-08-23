@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { FIXTURE, FIXTURE_MUSIC } from './fixture.config.mjs'
+import { openTab } from './inspector'
 
 /**
  * What survives closing the tab.
@@ -161,7 +162,9 @@ test('everything a project carries survives, not just the segments', async ({
   await page.getByTestId('transform-scale').fill('0.5')
   await page.getByTestId('blend-mode').selectOption('multiply')
   await page.getByTestId('mask-shape').selectOption('ellipse')
+  await openTab(page, 'effects')
   await page.getByTestId('add-effect').selectOption('grayscale')
+  await openTab(page, 'clip')
   await page.getByTestId('rate-2').click()
   await page.getByTestId('export-height').selectOption('720')
 

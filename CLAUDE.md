@@ -183,15 +183,28 @@
   holds a dozen, so one per frame exhausts them within a second.
 - No WebGL is not an error. Draw the frame unkeyed: a picture with its
   background still in it beats no picture at all.
-- SCOPE decides which column a control is in: the left column is the
-  project, the right one is whatever is selected. A panel that belongs
-  to neither - an authoring action like "add a caption" - is a project
-  control, not a property of the selection. Adding a panel to whichever
+- NOUNS ARE IN THE COLUMNS, VERBS ARE IN THE STRIP. The left column is
+  what the PROJECT is, the right column is what the SELECTION is, and
+  the strip between the picture and the timeline is what you can DO -
+  to the selection, or to the timeline. "Add text" is a verb and lives
+  in the strip even though it acts on the project; scale is a noun and
+  lives on the right. Nothing appears in two of them, or the two can
+  disagree about whether it is enabled. Adding a panel to whichever
   column is nearest is how the sidebar became thirteen panels deep.
+- The verbs in the strip run the SAME store operations the keyboard
+  shortcuts do. A verb is a second way to reach an edit, never a second
+  implementation of it, and never a place settings live: the transition
+  verb applies one at the default length and the KIND stays a field.
+- The inspector is TABBED, one aspect per tab, and `clip` is the tab
+  anything can have - a piece of music draws nothing, so it has no
+  transform and no compositing, but it still has a rate, and a first
+  tab about the picture would put speed out of reach. A tab with
+  nothing behind it is not offered rather than offered empty, and a tab
+  that stops applying when the selection changes falls back to `clip`.
 - The inspector offers only what applies: sound has no transform, a
   caption has no volume or speed. `tests/layout.spec.ts` says where
-  each panel belongs, so a new one cannot quietly land in the wrong
-  column.
+  each panel belongs and which tab it is behind, so a new one cannot
+  quietly land in the wrong column or in two tabs at once.
 - A waveform belongs to the SOURCE, not to the segment. Measure once
   per file and re-slice it for each block; never measure per segment.
   The request is not guarded by the generation counter, because a

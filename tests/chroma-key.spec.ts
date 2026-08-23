@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { FIXTURE, FIXTURE_GREEN } from './fixture.config.mjs'
+import { openTab } from './inspector'
 
 /**
  * Keying a colour out, end to end.
@@ -303,6 +304,9 @@ test.describe('the chroma key panel', () => {
     await page.getByTestId('add-overlay').click()
     await page.getByTestId('overlay-block').click()
 
+    // A caption opens at its own words, so the compositing controls are a tab
+    // away - and once there, the key is missing from them.
+    await openTab(page, 'clip')
     await expect(page.getByTestId('compositing-panel')).toBeVisible()
     await expect(page.getByTestId('chroma-toggle')).toHaveCount(0)
   })

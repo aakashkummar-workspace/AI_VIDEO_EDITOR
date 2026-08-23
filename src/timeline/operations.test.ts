@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest'
 import {
   addSegment,
   addSource,
+  addKeyframe,
   addTrack,
+  duplicateSegment,
   moveSegment,
   moveTrack,
   removeSegment,
   removeTrack,
   setComposition,
+  setTransition,
   splitSegmentAt,
   textSegmentsAt,
   timelineDuration,
@@ -645,6 +648,123 @@ describe('trimSegmentEnd', () => {
     })
 
     expect(segmentEndMicros(clipById(project, 't1'))).toBe(5 * SECOND)
+  })
+})
+
+describe('duplicateSegment', () => {
+  it('puts the copy at the end of the original', () => {
+    const project = duplicateSegment(oneClip(), {
+      segmentId: 'clip-1',
+      newSegmentId: 'clip-1-copy',
+    })
+
+    const [first, second] = clips(project)
+    expect(clips(project)).toHaveLength(2)
+    expect(second!.id).toBe('clip-1-copy')
+    expect(second!.timelineStartMicros).toBe(segmentEndMicros(first!))
+    expect(segmentDuration(second!)).toBe(segmentDuration(first!))
+  })
+
+  it('copies the source range rather than the whole file', () => {
+    const project = duplicateSegment(oneClip(), {
+      segmentId: 'clip-1',
+      newSegmentId: 'clip-1-copy',
+    })
+
+    // The original is a two second window on a ten second file. A copy that
+    // reached for the whole source would be a different clip.
+    const content = clipById(project, 'clip-1-copy').content as VideoContent
+    expect(content.sourceInMicros).toBe(1 * SECOND)
+    expect(content.sourceOutMicros).toBe(3 * SECOND)
+  })
+
+  it('makes room on a packed row instead of overlapping', () => {
+    let project = addClip(oneClip(), {
+      id: 'clip-2',
+      sourceId: source.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 4 * SECOND,
+    })
+    const lengthBefore = timelineDuration(project)
+
+    project = duplicateSegment(project, {
+      segmentId: 'clip-1',
+      newSegmentId: 'clip-1-copy',
+    })
+
+    // Everything after moves along by the copy's length, gap included, and the
+    // project gets exactly that much longer.
+    expect(clipById(project, 'clip-2').timelineStartMicros).toBe(6 * SECOND)
+    expect(timelineDuration(project)).toBe(lengthBefore + 2 * SECOND)
+  })
+
+  it('copies the keyframes and effects, sharing nothing', () => {
+    let project = duplicateSegment(
+      addKeyframe(oneClip(), {
+        segmentId: 'clip-1',
+        property: 'opacity',
+        offsetMicros: 0,
+        value: 0.5,
+      }),
+      { segmentId: 'clip-1', newSegmentId: 'clip-1-copy' },
+    )
+
+    const copy = clipById(project, 'clip-1-copy')
+    expect(copy.keyframes?.opacity).toEqual([{ offsetMicros: 0, value: 0.5 }])
+
+    // Editing one must not reach the other: keyframes are measured from the
+    // segment head, so two segments sharing an array would animate together.
+    project = addKeyframe(project, {
+      segmentId: 'clip-1',
+      property: 'opacity',
+      offsetMicros: 1 * SECOND,
+      value: 1,
+    })
+    expect(clipById(project, 'clip-1-copy').keyframes?.opacity).toHaveLength(1)
+    expect(clipById(project, 'clip-1').keyframes?.opacity).toHaveLength(2)
+  })
+
+  it('gives the copy no transition of its own', () => {
+    let project = addClip(oneClip(), {
+      id: 'clip-2',
+      sourceId: source.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 2 * SECOND,
+    })
+    project = setTransition(project, {
+      segmentId: 'clip-2',
+      kind: 'crossfade',
+      durationMicros: SECOND / 2,
+    })
+
+    project = duplicateSegment(project, {
+      segmentId: 'clip-2',
+      newSegmentId: 'clip-2-copy',
+    })
+
+    // The copy sits AT the original's end rather than reaching back into it,
+    // so it blends across nothing. Carrying the transition over would mean
+    // overlapping a clip it is a copy of.
+    expect(clipById(project, 'clip-2-copy').transitionIn).toBeUndefined()
+    expect(clipById(project, 'clip-2').transitionIn).toBeDefined()
+  })
+
+  it('refuses an id that is already taken, and an id that is not there', () => {
+    expect(() =>
+      duplicateSegment(oneClip(), {
+        segmentId: 'clip-1',
+        newSegmentId: 'clip-1',
+      }),
+    ).toThrow()
+
+    expect(() =>
+      duplicateSegment(oneClip(), {
+        segmentId: 'nothing',
+        newSegmentId: 'fresh',
+      }),
+    ).toThrow()
   })
 })
 

@@ -14,11 +14,10 @@ import Waveform from './Waveform'
 import { timelineDuration } from '../timeline/operations'
 import {
   segmentDuration,
+  segmentLabel,
   soundContent,
-  textContent,
   transitionWindow,
   type Project,
-  type Segment,
   type Track,
 } from '../timeline/types'
 
@@ -58,16 +57,6 @@ const CURSOR_FOR: Record<DragMode, string> = {
   'trim-start': 'ew-resize',
   'trim-end': 'ew-resize',
   move: 'move',
-}
-
-/** What a block says on it: the file it plays, or the words it draws. */
-function segmentLabel(project: Project, segment: Segment): string {
-  const text = textContent(segment)
-  if (text) return text.content
-
-  const content = segment.content
-  if (content.kind === 'text') return segment.id
-  return project.sources[content.sourceId]?.name ?? content.sourceId
 }
 
 /**

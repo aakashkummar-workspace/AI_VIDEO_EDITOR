@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { FIXTURE } from './fixture.config.mjs'
+import { openTab } from './inspector'
 
 /**
  * Saving and reopening a project, through the real app rather than the model.
@@ -56,6 +57,7 @@ test.beforeEach(async ({ page }) => {
 
   await page.getByTestId('clip').click()
   await page.getByTestId('transform-scale').fill('0.5')
+  await openTab(page, 'effects')
   await page.getByTestId('add-effect').selectOption('grayscale')
   await expect(page.getByTestId('effect-row')).toHaveCount(1)
 })

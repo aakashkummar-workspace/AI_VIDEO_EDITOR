@@ -12,6 +12,7 @@ import {
   type SegmentPropertiesInput,
   type ChromaKeyInput,
   type MaskInput,
+  type DuplicateSegmentInput,
   type SplitSegmentInput,
   type TextStyleInput,
   type TransitionInput,
@@ -62,6 +63,7 @@ export type TimelineStore = {
   moveSegment: (input: MoveSegmentInput) => void
   trimSegmentStart: (input: TrimInput) => void
   trimSegmentEnd: (input: TrimInput) => void
+  duplicateSegment: (input: DuplicateSegmentInput) => void
   splitSegmentAt: (input: SplitSegmentInput) => void
   setSegmentRate: (input: { segmentId: string; rate: number }) => void
   setSegmentBlendMode: (input: {
@@ -207,6 +209,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     moveSegment: (input) => apply(mutators.moveSegment, input),
     trimSegmentStart: (input) => apply(mutators.trimSegmentStart, input),
     trimSegmentEnd: (input) => apply(mutators.trimSegmentEnd, input),
+    duplicateSegment: (input) => apply(mutators.duplicateSegment, input),
     splitSegmentAt: (input) => apply(mutators.splitSegmentAt, input),
     setSegmentBlendMode: (input) =>
       apply(mutators.setSegmentBlendMode, input),

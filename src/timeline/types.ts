@@ -994,6 +994,22 @@ export function soundContent(segment: Segment): SoundContent | undefined {
 }
 
 /** Narrows a segment to a text one, or undefined if it is video. */
+/**
+ * What a segment is CALLED: the file it plays, or the words it draws.
+ *
+ * One answer, because two things name the same segment - the block on the
+ * timeline and the action strip above it - and a strip that worked its own
+ * name out could call a clip something the block does not.
+ */
+export function segmentLabel(project: Project, segment: Segment): string {
+  const text = textContent(segment)
+  if (text) return text.content
+
+  const content = segment.content
+  if (content.kind === 'text') return segment.id
+  return project.sources[content.sourceId]?.name ?? content.sourceId
+}
+
 export function textContent(segment: Segment): TextContent | undefined {
   return segment.content.kind === 'text' ? segment.content : undefined
 }

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { FIXTURE, FIXTURE_MUSIC } from './fixture.config.mjs'
+import { openTab } from './inspector'
 
 /**
  * Music on a row of its own, through the real decoder and the real mix.
@@ -350,6 +351,7 @@ test.describe('audio in the app', () => {
     await page.setInputFiles('[data-testid=media-input]', FIXTURE_MUSIC.path)
     await page.getByTestId('audio-block').click()
 
+    await openTab(page, 'audio')
     await expect(page.getByTestId('levels-panel')).toBeVisible()
     await expect(page.getByTestId('transform-panel')).toHaveCount(0)
   })
@@ -360,7 +362,10 @@ test.describe('audio in the app', () => {
     await page.setInputFiles('[data-testid=media-input]', FIXTURE.path)
     await page.getByTestId('clip').click()
 
+    // A clip has both, one tab each: a picture to transform, and a sound to
+    // set the level of.
     await expect(page.getByTestId('transform-panel')).toBeVisible()
+    await openTab(page, 'audio')
     await expect(page.getByTestId('levels-panel')).toBeVisible()
   })
 
@@ -370,6 +375,7 @@ test.describe('audio in the app', () => {
     await page.setInputFiles('[data-testid=media-input]', FIXTURE_MUSIC.path)
     await page.getByTestId('audio-block').click()
 
+    await openTab(page, 'audio')
     await page.getByTestId('transform-volume').fill('0.5')
     expect(
       await page.evaluate(

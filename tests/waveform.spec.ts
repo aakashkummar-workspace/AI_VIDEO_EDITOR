@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { FIXTURE, FIXTURE_MUSIC, FIXTURE_TONES } from './fixture.config.mjs'
+import { openTab } from './inspector'
 
 /**
  * Waveforms, and the three controls that had operations but no buttons.
@@ -153,6 +154,7 @@ test.describe('the controls that had no buttons', () => {
 
   test('an effect can be moved along the chain', async ({ page }) => {
     await page.getByTestId('clip').click()
+    await openTab(page, 'effects')
     await page.getByTestId('add-effect').selectOption('blur')
     await page.getByTestId('add-effect').selectOption('contrast')
 
@@ -176,6 +178,7 @@ test.describe('the controls that had no buttons', () => {
 
   test('the ends of the chain cannot go further', async ({ page }) => {
     await page.getByTestId('clip').click()
+    await openTab(page, 'effects')
     await page.getByTestId('add-effect').selectOption('blur')
 
     await expect(page.getByTestId('effect-up-blur')).toBeDisabled()
