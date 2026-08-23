@@ -171,6 +171,19 @@
 - A mask is cut on a SCRATCH LAYER, never in place: `destination-in` on
   the composition would take the rows underneath with it. The feather is
   a blur on the mask shape, not a gradient per side.
+- The autosave IS a draft: written with `toDraft`, read with
+  `parseDraft`. One format and one validator, so an autosave left by an
+  older build is handled by the same rules a file off disk is. Never
+  add a second serialisation for it.
+- Media is stored in IndexedDB as the File itself, keyed by sourceId -
+  the same split the source registry already makes. A File survives
+  IndexedDB whole, so a restored project needs no re-pick and shows no
+  permission prompt. File-system handles would not: they exist only for
+  files opened through the picker, and ours come from an input element.
+- NOTHING may be autosaved until the restore has finished. For a moment
+  after a reload the store holds the empty starting project, and a save
+  fired then erases the very thing being restored. `tests/persistence`
+  reloads, waits and reloads again to prove it does not.
 - A draft file (`draft.ts`) is data off someone's disk: parse it field
   by field into a fresh object, never cast it. It carries no media, so
   reopening one leaves its sources offline until files are handed back.

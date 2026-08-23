@@ -25,6 +25,15 @@ import {
 } from './timeline/draft'
 import { timelineDuration } from './timeline/operations'
 import {
+  clearEverything,
+  loadAllMedia,
+  loadProject as loadSavedProject,
+  requestDurableStorage,
+  saveMedia,
+  saveProject,
+  storageUsage,
+} from './timeline/persistence'
+import {
   clearSourceFiles,
   hasSourceFile,
   registerSourceFile,
@@ -191,6 +200,18 @@ export default function App() {
    * source stopped being offline.
    */
   const [relinkTick, setRelinkTick] = useState(0)
+  /** When the timeline was last written to storage, for the saved indicator. */
+  const [savedAt, setSavedAt] = useState<number | null>(null)
+  const [usage, setUsage] = useState<{
+    usageBytes: number
+    quotaBytes: number
+  } | null>(null)
+  /**
+   * Until the saved project has been read back, nothing may be written over
+   * it - an autosave fired by the empty starting state would erase the very
+   * project it is about to restore.
+   */
+  const [restored, setRestored] = useState(false)
 
   const dragRef = useRef<ActiveDrag | null>(null)
   /** A scrub in progress: where it was grabbed, and from what position. */
@@ -280,6 +301,84 @@ export default function App() {
     const target = previewTargetRef.current ?? currentMicrosRef.current
     player.seek(Math.min(Math.max(0, target), timelineEnd - 1))
   }, [displayProject])
+
+  /**
+   * Brings back whatever was open last time.
+   *
+   * The media comes back first, because the worker cannot decode a source it
+   * has never been handed a file for - and the timeline is only published once
+   * every source it names is either restored or known to be missing.
+   */
+  useEffect(() => {
+    let cancelled = false
+
+    async function restore() {
+      try {
+        const [saved, media] = await Promise.all([
+          loadSavedProject(),
+          loadAllMedia(),
+        ])
+        if (cancelled) return
+
+        if (saved) {
+          for (const [sourceId, file] of media) {
+            registerSourceFile(sourceId, file)
+          }
+
+          // Hand the worker every file before the project reaches it.
+          await Promise.all(
+            Object.keys(saved.project.sources)
+              .filter((sourceId) => media.has(sourceId))
+              .map((sourceId) =>
+                playerRef.current
+                  ?.probeSource(sourceId, media.get(sourceId)!)
+                  .catch(() => undefined),
+              ),
+          )
+          if (cancelled) return
+
+          useTimelineStore.getState().openProject(saved.project)
+          setSavedAt(saved.savedAt)
+          setRelinkTick((tick) => tick + 1)
+          exportNameRef.current =
+            Object.values(saved.project.sources)[0]?.name ?? 'timeline'
+        }
+      } catch (err) {
+        // A storage that cannot be read is not a reason to refuse to open.
+        console.warn('[persistence] could not restore:', err)
+      } finally {
+        if (!cancelled) setRestored(true)
+      }
+    }
+
+    void restore()
+    void requestDurableStorage()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  /**
+   * Writes the timeline out shortly after it stops changing.
+   *
+   * Debounced rather than written per edit: dragging a slider commits a value
+   * per frame, and each one would otherwise be a transaction.
+   */
+  useEffect(() => {
+    if (!restored) return
+
+    const timer = setTimeout(() => {
+      void saveProject(project)
+        .then(() => {
+          setSavedAt(Date.now())
+          return storageUsage()
+        })
+        .then((next) => setUsage(next))
+        .catch((err) => console.warn('[persistence] could not save:', err))
+    }, 400)
+
+    return () => clearTimeout(timer)
+  }, [project, restored])
 
   const seek = useCallback((timelineMicros: number) => {
     playerRef.current?.seek(timelineMicros)
@@ -687,6 +786,9 @@ export default function App() {
       }
 
       registerSourceFile(sourceId, file)
+      void saveMedia(sourceId, file).catch((err) =>
+        console.warn('[persistence] could not keep the media:', err),
+      )
 
       // The real file decides the geometry from here: it is what gets decoded.
       store.addSource({
@@ -793,6 +895,11 @@ export default function App() {
 
     const sourceId = crypto.randomUUID()
     registerSourceFile(sourceId, file)
+    // Kept so the next visit needs no re-picking. A failure here costs the
+    // convenience, not the edit, so it is warned about rather than surfaced.
+    void saveMedia(sourceId, file).catch((err) =>
+      console.warn('[persistence] could not keep the media:', err),
+    )
 
     try {
       const geometry = await playerRef.current!.probeSource(sourceId, file)
@@ -1599,6 +1706,50 @@ export default function App() {
             </ul>
           </section>
         )}
+
+        <section
+          className="panel"
+          data-testid="storage-panel"
+          // False until whatever was saved has been read back and published.
+          // Anything reading the timeline before that is reading the empty
+          // state it starts in rather than the project.
+          data-restored={restored ? 'true' : 'false'}
+        >
+          <h2 className="panel-title">Saved</h2>
+          <p
+            className="panel-note"
+            data-testid="storage-state"
+            // The moment of the last write, so a test can wait for a NEW one
+            // rather than for the fact that a save has ever happened.
+            data-saved-at={savedAt ?? ''}
+          >
+            {savedAt === null
+              ? 'Nothing saved yet.'
+              : 'This project and its media are kept in this browser, and come'
+                + ' back when you return.'}
+          </p>
+          {usage && usage.quotaBytes > 0 && (
+            <p className="panel-note" data-testid="storage-usage">
+              Using {(usage.usageBytes / 1e6).toFixed(1)} MB of{' '}
+              {(usage.quotaBytes / 1e9).toFixed(1)} GB.
+            </p>
+          )}
+          <button
+            type="button"
+            data-testid="clear-storage"
+            onClick={() => {
+              void clearEverything()
+                .then(() => {
+                  setSavedAt(null)
+                  return storageUsage()
+                })
+                .then((next) => setUsage(next))
+                .catch((err) => setError(String(err)))
+            }}
+          >
+            Clear saved data
+          </button>
+        </section>
 
         <section className="panel shortcuts">
           <h2 className="panel-title">Shortcuts</h2>
