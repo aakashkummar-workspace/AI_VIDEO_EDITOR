@@ -43,7 +43,9 @@ import {
   BLEND_MODES,
   DEFAULT_TRANSITION_MICROS,
   EFFECT_KINDS,
+  FONT_FAMILIES,
   MASK_SHAPES,
+  TEXT_ALIGNMENTS,
   EXPORT_HEIGHTS,
   EXPORT_QUALITIES,
   TRANSITION_KINDS,
@@ -108,6 +110,14 @@ const LEVEL_FIELDS: PropertyField[] = [
 ]
 
 const EFFECT_KIND_NAMES = Object.keys(EFFECT_KINDS) as EffectKind[]
+
+/**
+ * How far an arrow key moves the playhead.
+ *
+ * A thirtieth of a second: sources differ in frame rate and the timeline has
+ * no rate of its own, so this is a readable step rather than a real frame.
+ */
+const FRAME_STEP_MICROS = Math.round(1_000_000 / 30)
 
 /** The speeds offered as one click, since these are the ones people want. */
 const RATE_PRESETS = [0.25, 0.5, 1, 2, 4]
@@ -570,12 +580,55 @@ export default function App() {
           timelineMicros: currentMicros,
           newSegmentId: crypto.randomUUID(),
         })
+        return
+      }
+
+      const duration = timelineDuration(store.project)
+
+      // Space is the one shortcut everybody tries first. It also scrolls the
+      // page by default, hence the preventDefault.
+      if (event.key === ' ') {
+        event.preventDefault()
+        const player = playerRef.current
+        if (!player) return
+        if (playingRef.current) player.pause()
+        else player.play()
+        return
+      }
+
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault()
+        // A frame at a time, or a second with shift held.
+        const step = event.shiftKey ? 1_000_000 : FRAME_STEP_MICROS
+        const delta = event.key === 'ArrowLeft' ? -step : step
+        seekFromUser(clampToTimeline(currentMicros + delta, duration))
+        return
+      }
+
+      if (event.key === 'Home' || event.key === 'End') {
+        event.preventDefault()
+        seekFromUser(
+          event.key === 'Home' ? 0 : Math.max(0, duration - 1),
+        )
+        return
+      }
+
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        if (!selectedSegmentId) return
+        event.preventDefault()
+        store.removeSegment(selectedSegmentId)
+        setSelectedSegmentId(null)
+        return
+      }
+
+      if (event.key === 'Escape') {
+        setSelectedSegmentId(null)
       }
     }
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [currentMicros])
+  }, [currentMicros, selectedSegmentId, seekFromUser])
 
   /**
    * Edits one transform field.
@@ -1313,6 +1366,152 @@ export default function App() {
                 }
               />
             </label>{' '}
+            <label>
+              font{' '}
+              <select
+                data-testid="overlay-font"
+                value={selectedText.fontFamily ?? 'sans-serif'}
+                onChange={(event) =>
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
+                    fontFamily: event.target.value,
+                  })
+                }
+              >
+                {FONT_FAMILIES.map((family) => (
+                  <option key={family} value={family}>
+                    {family}
+                  </option>
+                ))}
+              </select>
+            </label>{' '}
+            <label>
+              align{' '}
+              <select
+                data-testid="overlay-align"
+                value={selectedText.align ?? 'left'}
+                onChange={(event) =>
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
+                    align: event.target
+                      .value as (typeof TEXT_ALIGNMENTS)[number],
+                  })
+                }
+              >
+                {TEXT_ALIGNMENTS.map((align) => (
+                  <option key={align} value={align}>
+                    {align}
+                  </option>
+                ))}
+              </select>
+            </label>{' '}
+            <label>
+              bold{' '}
+              <input
+                type="checkbox"
+                data-testid="overlay-bold"
+                checked={selectedText.bold === true}
+                onChange={(event) =>
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
+                    bold: event.target.checked,
+                  })
+                }
+              />
+            </label>{' '}
+            <label>
+              italic{' '}
+              <input
+                type="checkbox"
+                data-testid="overlay-italic"
+                checked={selectedText.italic === true}
+                onChange={(event) =>
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
+                    italic: event.target.checked,
+                  })
+                }
+              />
+            </label>{' '}
+            <label>
+              outline{' '}
+              <input
+                type="number"
+                min={0}
+                data-testid="overlay-outline"
+                onBlur={() => useTimelineStore.getState().endCoalescing()}
+                value={selectedText.outlineWidthPx ?? 0}
+                onChange={(event) =>
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
+                    outlineWidthPx: Math.max(0, Number(event.target.value)),
+                    outlineColor: selectedText.outlineColor ?? '#000000',
+                  })
+                }
+              />
+            </label>
+            <label>
+              <input
+                type="color"
+                data-testid="overlay-outline-color"
+                value={selectedText.outlineColor ?? '#000000'}
+                onChange={(event) =>
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
+                    outlineColor: event.target.value,
+                  })
+                }
+              />
+            </label>{' '}
+            <label>
+              shadow{' '}
+              <input
+                type="number"
+                min={0}
+                data-testid="overlay-shadow"
+                onBlur={() => useTimelineStore.getState().endCoalescing()}
+                value={selectedText.shadowBlurPx ?? 0}
+                onChange={(event) =>
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
+                    shadowBlurPx: Math.max(0, Number(event.target.value)),
+                    shadowColor: selectedText.shadowColor ?? '#000000',
+                  })
+                }
+              />
+            </label>{' '}
+            <label>
+              box{' '}
+              <input
+                type="checkbox"
+                data-testid="overlay-box"
+                checked={selectedText.backgroundColor !== undefined}
+                onChange={(event) =>
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
+                    backgroundColor: event.target.checked ? '#000000' : '',
+                    backgroundPaddingPx:
+                      selectedText.backgroundPaddingPx ??
+                      Math.round(selectedText.sizePx * 0.25),
+                  })
+                }
+              />
+            </label>
+            {selectedText.backgroundColor !== undefined && (
+              <label>
+                <input
+                  type="color"
+                  data-testid="overlay-box-color"
+                  value={selectedText.backgroundColor}
+                  onChange={(event) =>
+                    useTimelineStore.getState().setTextStyle({
+                      segmentId: selectedSegmentId,
+                      backgroundColor: event.target.value,
+                    })
+                  }
+                />
+              </label>
+            )}{' '}
             <button
               type="button"
               data-testid="remove-overlay"
@@ -1754,6 +1953,14 @@ export default function App() {
         <section className="panel shortcuts">
           <h2 className="panel-title">Shortcuts</h2>
           <dl>
+            <dt>Space</dt>
+            <dd>play or pause</dd>
+            <dt>&#8592; &#8594;</dt>
+            <dd>step a frame; hold shift for a second</dd>
+            <dt>Home / End</dt>
+            <dd>jump to either end</dd>
+            <dt>Delete</dt>
+            <dd>remove what is selected</dd>
             <dt>S</dt>
             <dd>split at the playhead</dd>
             <dt>Ctrl+Z</dt>

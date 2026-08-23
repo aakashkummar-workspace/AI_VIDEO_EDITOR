@@ -20,6 +20,8 @@ import {
   EFFECT_KINDS,
   BLEND_MODES,
   EXPORT_QUALITIES,
+  FONT_FAMILIES,
+  TEXT_ALIGNMENTS,
   MASK_SHAPES,
   MAX_RATE,
   MIN_RATE,
@@ -39,6 +41,8 @@ import {
   type BlendMode,
   type Mask,
   type MaskShape,
+  type TextAlign,
+  type TextContent,
   type Track,
   type TrackKind,
   type Transition,
@@ -316,7 +320,7 @@ function parseContent(value: unknown, what: string): SegmentContent {
   }
 
   if (kind === 'text') {
-    return {
+    const text: TextContent = {
       kind: 'text',
       content: typeof raw.content === 'string' ? raw.content : '',
       x: num(raw.x, `${what} x`),
@@ -325,6 +329,47 @@ function parseContent(value: unknown, what: string): SegmentContent {
       color: str(raw.color, `${what} colour`),
       durationMicros: micros(raw.durationMicros, `${what} duration`),
     }
+
+    if (raw.fontFamily !== undefined) {
+      const family = str(raw.fontFamily, `${what} font`)
+      if (!FONT_FAMILIES.includes(family as never)) {
+        fail(`${what} uses a font this version does not know (${family}).`)
+      }
+      text.fontFamily = family
+    }
+
+    if (raw.align !== undefined) {
+      const align = str(raw.align, `${what} alignment`)
+      if (!TEXT_ALIGNMENTS.includes(align as TextAlign)) {
+        fail(`${what} uses an alignment this version does not know (${align}).`)
+      }
+      text.align = align as TextAlign
+    }
+
+    if (raw.bold === true) text.bold = true
+    if (raw.italic === true) text.italic = true
+    if (raw.outlineColor !== undefined) {
+      text.outlineColor = str(raw.outlineColor, `${what} outline colour`)
+    }
+    if (raw.shadowColor !== undefined) {
+      text.shadowColor = str(raw.shadowColor, `${what} shadow colour`)
+    }
+    if (raw.backgroundColor !== undefined) {
+      text.backgroundColor = str(raw.backgroundColor, `${what} box colour`)
+    }
+
+    for (const field of [
+      'outlineWidthPx',
+      'shadowBlurPx',
+      'backgroundPaddingPx',
+    ] as const) {
+      if (raw[field] === undefined) continue
+      const value = num(raw[field], `${what} ${field}`)
+      if (value < 0) fail(`${what} has a negative ${field}.`)
+      text[field] = value
+    }
+
+    return text
   }
 
   return fail(`${what} is a kind of segment this version does not know (${kind}).`)

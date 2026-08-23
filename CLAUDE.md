@@ -171,6 +171,16 @@
 - A mask is cut on a SCRATCH LAYER, never in place: `destination-in` on
   the composition would take the rows underneath with it. The feather is
   a blur on the mask shape, not a gradient per side.
+- Only GENERIC font families are offered, and no font file is ever
+  shipped or fetched. A named webfont would have to finish loading
+  before the preview or the export could draw with it, and losing that
+  race shows up as an export that does not match the preview. Generic
+  families resolve everywhere, immediately, in both contexts.
+- `fontStringFor` is the one place a caption becomes a CSS font, so the
+  measuring and the drawing cannot disagree about the layout - which
+  would put a background box in the wrong place.
+- Every keyboard shortcut must stand down while a field has focus. A
+  space typed into a caption is a space, not a play command.
 - The autosave IS a draft: written with `toDraft`, read with
   `parseDraft`. One format and one validator, so an autosave left by an
   older build is handled by the same rules a file off disk is. Never

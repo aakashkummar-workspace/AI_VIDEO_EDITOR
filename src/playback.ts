@@ -1,6 +1,8 @@
 import { textSegmentsAt, visibleVideoSegmentsAt } from './timeline/operations'
 import {
-  OVERLAY_FONT_FAMILY,
+  LINE_HEIGHT,
+  fontStringFor,
+  textLines,
   type BlendMode,
   type Mask,
   filterFor,
@@ -455,12 +457,80 @@ export function layerSegmentsAt(
 export function drawText(context: RenderContext, text: TextContent): void {
   if (text.content.length === 0 || text.sizePx <= 0) return
 
+  const lines = textLines(text)
+  const lineHeight = text.sizePx * LINE_HEIGHT
+  const align = text.align ?? 'left'
+
   context.save()
-  context.font = `${text.sizePx}px ${OVERLAY_FONT_FAMILY}`
-  context.fillStyle = text.color
-  context.textBaseline = 'top'
-  context.fillText(text.content, text.x, text.y)
-  context.restore()
+  try {
+    context.font = fontStringFor(text)
+    context.textBaseline = 'top'
+    context.textAlign = align
+
+    // The box goes down first, so everything else lands on top of it.
+    if (text.backgroundColor) {
+      const padding = text.backgroundPaddingPx ?? 0
+      const widest = lines.reduce(
+        (widest, line) => Math.max(widest, context.measureText(line).width),
+        0,
+      )
+      const boxWidth = widest + padding * 2
+      const boxHeight = lines.length * lineHeight + padding * 2
+      const left =
+        align === 'center'
+          ? text.x - boxWidth / 2
+          : align === 'right'
+            ? text.x - boxWidth
+            : text.x - padding
+
+      context.save()
+      context.fillStyle = text.backgroundColor
+      context.fillRect(left, text.y - padding, boxWidth, boxHeight)
+      context.restore()
+    }
+
+    const outlineWidth = text.outlineWidthPx ?? 0
+    const hasOutline = outlineWidth > 0 && text.outlineColor !== undefined
+    const shadowBlur = text.shadowBlurPx ?? 0
+    const hasShadow = shadowBlur > 0 && text.shadowColor !== undefined
+
+    /** The outline, doubled and centred so the fill covers its inner half. */
+    function stroke(line: string, y: number) {
+      context.lineWidth = outlineWidth * 2
+      context.lineJoin = 'round'
+      context.strokeStyle = text.outlineColor!
+      context.strokeText(line, text.x, y)
+    }
+
+    function fill(line: string, y: number) {
+      context.fillStyle = text.color
+      context.fillText(line, text.x, y)
+    }
+
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index]!
+      if (line.length === 0) continue
+
+      const y = text.y + index * lineHeight
+
+      // The shadow is cast ONCE, by whichever mark is outermost - the outline
+      // if there is one, the fill if not. Attaching it to both would draw it
+      // twice and thicken the edge.
+      if (hasShadow) {
+        context.save()
+        context.shadowBlur = shadowBlur
+        context.shadowColor = text.shadowColor!
+        if (hasOutline) stroke(line, y)
+        else fill(line, y)
+        context.restore()
+      }
+
+      if (hasOutline && !hasShadow) stroke(line, y)
+      if (hasOutline || !hasShadow) fill(line, y)
+    }
+  } finally {
+    context.restore()
+  }
 }
 
 /**

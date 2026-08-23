@@ -42,15 +42,19 @@ export type VideoContent = {
 }
 
 /**
- * A line of text drawn over the composition.
+ * Text drawn over the composition.
  *
  * Unlike a video segment it has no source, so its duration is stored rather
- * than derived.
+ * than derived. `content` may contain newlines, which are drawn as lines
+ * rather than escaped - a caption is usually more than one.
+ *
+ * Everything past `color` is optional and absent by default, so a caption made
+ * before any of it existed still renders exactly as it did.
  */
 export type TextContent = {
   kind: 'text'
   content: string
-  /** Top-left corner, in composition pixels. */
+  /** Anchor point, in composition pixels. Which corner depends on `align`. */
   x: number
   y: number
   /** Cap height in composition pixels. */
@@ -58,7 +62,45 @@ export type TextContent = {
   /** Any CSS colour the canvas will accept. */
   color: string
   durationMicros: number
+
+  /** One of FONT_FAMILIES. Absent means the default. */
+  fontFamily?: string
+  bold?: boolean
+  italic?: boolean
+  align?: TextAlign
+  /** Drawn under the fill, which is what makes text legible over footage. */
+  outlineWidthPx?: number
+  outlineColor?: string
+  shadowBlurPx?: number
+  shadowColor?: string
+  /** A box behind the text. Absent colour means no box at all. */
+  backgroundColor?: string
+  backgroundPaddingPx?: number
 }
+
+export type TextAlign = 'left' | 'center' | 'right'
+
+export const TEXT_ALIGNMENTS: TextAlign[] = ['left', 'center', 'right']
+
+/**
+ * The families on offer.
+ *
+ * Generic families only, deliberately: no font file is shipped and none is
+ * fetched, so every one of these resolves to something on any machine and
+ * renders the same in the preview and in the export, which are the same
+ * browser. A named webfont would have to be loaded before either could draw
+ * with it, and a race there would show up as an export that does not match.
+ */
+export const FONT_FAMILIES = [
+  'sans-serif',
+  'serif',
+  'monospace',
+  'system-ui',
+  'cursive',
+] as const
+
+/** How far apart lines of a caption sit, as a multiple of the size. */
+export const LINE_HEIGHT = 1.2
 
 /**
  * A segment that plays part of a source file and draws nothing.
@@ -504,8 +546,27 @@ export type Project = {
 /** The shortest segment the model allows. Zero and negative durations are invalid. */
 export const MIN_SEGMENT_MICROS = 1
 
-/** The one font. No picker: this is not a typesetting program. */
+/** What a caption uses when it has not been told otherwise. */
 export const OVERLAY_FONT_FAMILY = 'sans-serif'
+
+/**
+ * The CSS font string for a caption.
+ *
+ * One place, so the measuring and the drawing cannot disagree about what is
+ * being laid out - which would put a background box in the wrong place.
+ */
+export function fontStringFor(text: TextContent): string {
+  const style = text.italic ? 'italic ' : ''
+  const weight = text.bold ? 'bold ' : ''
+  const family = text.fontFamily ?? OVERLAY_FONT_FAMILY
+
+  return `${style}${weight}${text.sizePx}px ${family}`
+}
+
+/** The lines of a caption. A caption is usually more than one. */
+export function textLines(text: TextContent): string[] {
+  return text.content.split('\n')
+}
 
 /** Used until a source arrives to default it. */
 export const DEFAULT_COMPOSITION: Composition = { width: 1920, height: 1080 }

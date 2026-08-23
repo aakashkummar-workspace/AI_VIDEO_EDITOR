@@ -6,7 +6,9 @@ import {
   exportSettingsOf,
   MIN_SEGMENT_MICROS,
   BLEND_MODES,
+  FONT_FAMILIES,
   MASK_SHAPES,
+  TEXT_ALIGNMENTS,
   TRANSITION_KINDS,
   clampEffectAmount,
   clampProperty,
@@ -35,6 +37,7 @@ import {
   type Keyframes,
   type Mask,
   type MaskShape,
+  type TextAlign,
   type SoundContent,
   type TransitionKind,
   type Track,
@@ -299,6 +302,16 @@ export type TextStyleInput = {
   y?: number
   sizePx?: number
   color?: string
+  fontFamily?: string
+  bold?: boolean
+  italic?: boolean
+  align?: TextAlign
+  outlineWidthPx?: number
+  outlineColor?: string
+  shadowBlurPx?: number
+  shadowColor?: string
+  backgroundColor?: string
+  backgroundPaddingPx?: number
 }
 
 export const mutators = {
@@ -552,6 +565,47 @@ export const mutators = {
         throw new Error('A text segment must have a positive size.')
       }
       content.sizePx = Math.round(args.sizePx)
+    }
+
+    if (args.fontFamily !== undefined) {
+      if (!FONT_FAMILIES.includes(args.fontFamily as never)) {
+        throw new Error(`Unknown font ${args.fontFamily}.`)
+      }
+      content.fontFamily = args.fontFamily
+    }
+
+    if (args.align !== undefined) {
+      if (!TEXT_ALIGNMENTS.includes(args.align)) {
+        throw new Error(`Unknown alignment ${args.align}.`)
+      }
+      content.align = args.align
+    }
+
+    if (args.bold !== undefined) content.bold = args.bold
+    if (args.italic !== undefined) content.italic = args.italic
+    if (args.outlineColor !== undefined) {
+      content.outlineColor = args.outlineColor
+    }
+    if (args.shadowColor !== undefined) content.shadowColor = args.shadowColor
+
+    // A background with no colour is no background, so clearing the colour is
+    // how one is taken off.
+    if (args.backgroundColor !== undefined) {
+      if (args.backgroundColor === '') delete content.backgroundColor
+      else content.backgroundColor = args.backgroundColor
+    }
+
+    for (const field of [
+      'outlineWidthPx',
+      'shadowBlurPx',
+      'backgroundPaddingPx',
+    ] as const) {
+      const value = args[field]
+      if (value === undefined) continue
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error(`${field} cannot be negative.`)
+      }
+      content[field] = Math.round(value)
     }
   },
 
