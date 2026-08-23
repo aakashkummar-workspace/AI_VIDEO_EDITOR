@@ -38,12 +38,14 @@ import {
   exportDimensions,
   exportSettingsOf,
   findSegment,
+  propertyAt,
+  soundContent,
+  sourceHasVideo,
   videoContent,
   hasKeyframeAt,
   isPropertyAnimated,
   segmentEndMicros,
   textContent,
-  transformAt,
   type AnimatableProperty,
   type EffectKind,
   type Project,
@@ -64,18 +66,26 @@ type ActiveDrag = {
 /** A new text segment lands mid-composition, visible, and lasting two seconds. */
 const NEW_OVERLAY_MICROS = 2_000_000
 
-/** How each transform field is presented and stepped in the panel. */
-const TRANSFORM_FIELDS: {
+/** How each animatable field is presented and stepped in the panel. */
+type PropertyField = {
   property: AnimatableProperty
   label: string
   step: number
   min?: number
   max?: number
-}[] = [
+}
+
+/** Where a segment is drawn. Meaningless for a segment nobody looks at. */
+const TRANSFORM_FIELDS: PropertyField[] = [
   { property: 'scale', label: 'scale', step: 0.05, min: 0.01 },
   { property: 'x', label: 'offset x', step: 1 },
   { property: 'y', label: 'offset y', step: 1 },
   { property: 'opacity', label: 'opacity', step: 0.05, min: 0, max: 1 },
+]
+
+/** How loud a segment is. Meaningless for a segment nobody hears. */
+const LEVEL_FIELDS: PropertyField[] = [
+  { property: 'volume', label: 'volume', step: 0.05, min: 0, max: 4 },
 ]
 
 const EFFECT_KIND_NAMES = Object.keys(EFFECT_KINDS) as EffectKind[]
@@ -470,7 +480,64 @@ export default function App() {
       return
     }
 
-    store.setSegmentTransform({ segmentId: selectedSegmentId, [property]: value })
+    store.setSegmentProperties({
+      segmentId: selectedSegmentId,
+      [property]: value,
+    })
+  }
+
+  /**
+   * One editable property: its value now, and the keyframe button for it.
+   *
+   * Shared by the transform panel and the audio panel, because a volume fade
+   * and an opacity fade are the same interaction on the same machinery - the
+   * only difference is which list the field came from.
+   */
+  function propertyField(field: PropertyField) {
+    if (!selectedSegment || !selectedSegmentId) return null
+
+    const offsetMicros = offsetIn(selectedSegment, currentMicros)
+    const animated = isPropertyAnimated(selectedSegment, field.property)
+    const keyed = hasKeyframeAt(selectedSegment, field.property, offsetMicros)
+    const value = propertyAt(selectedSegment, field.property, currentMicros)
+
+    return (
+      <label key={field.property} className="transform-field">
+        <span className="transform-label">{field.label}</span>
+        <input
+          type="number"
+          step={field.step}
+          min={field.min}
+          max={field.max}
+          data-testid={`transform-${field.property}`}
+          value={Math.round(value * 1000) / 1000}
+          onBlur={() => useTimelineStore.getState().endCoalescing()}
+          onChange={(event) =>
+            setTransformValue(field.property, Number(event.target.value))
+          }
+        />
+        <button
+          type="button"
+          className={
+            keyed
+              ? 'keyframe-toggle is-keyed'
+              : animated
+                ? 'keyframe-toggle is-animated'
+                : 'keyframe-toggle'
+          }
+          title={
+            keyed
+              ? 'Remove the keyframe at the playhead'
+              : 'Add a keyframe at the playhead'
+          }
+          data-testid={`keyframe-${field.property}`}
+          data-keyed={keyed ? 'true' : 'false'}
+          onClick={() => toggleKeyframe(field.property)}
+        >
+          {keyed ? '\u25c6' : '\u25c7'}
+        </button>
+      </label>
+    )
   }
 
   /** Puts a keyframe at the playhead, or takes the one there away. */
@@ -494,7 +561,7 @@ export default function App() {
       segmentId: selectedSegmentId,
       property,
       offsetMicros,
-      value: transformAt(segment, currentMicros)[property],
+      value: propertyAt(segment, property, currentMicros),
     })
   }
 
@@ -651,15 +718,23 @@ export default function App() {
 
   /**
    * Appends a segment covering the whole of a source, after everything already
-   * on the video row. Text on a row of its own does not push it along.
+   * on its own row.
+   *
+   * Which row that is follows from the file: something with a picture goes on
+   * a video row, something with only sound goes on an audio row. Text on a row
+   * of its own does not push either of them along.
    */
   function appendClip(sourceId: string) {
     const store = useTimelineStore.getState()
     const source = store.project.sources[sourceId]
     if (!source) return
 
-    const trackId = firstTrackId(store.project, 'video')
-    if (!trackId) return
+    const kind: TrackKind = sourceHasVideo(source) ? 'video' : 'audio'
+    const trackId = firstTrackId(store.project, kind)
+    if (!trackId) {
+      setError(`This project has no ${kind} row to put ${source.name} on.`)
+      return
+    }
 
     store.addSegment({
       trackId,
@@ -667,7 +742,7 @@ export default function App() {
         id: crypto.randomUUID(),
         timelineStartMicros: trackEndMicros(store.project, trackId),
         content: {
-          kind: 'video',
+          kind,
           sourceId,
           sourceInMicros: 0,
           sourceOutMicros: source.durationMicros,
@@ -689,15 +764,19 @@ export default function App() {
     const isFirstSource = Object.keys(store.project.sources).length === 0
     if (isFirstSource) exportNameRef.current = file.name
 
+    /** Whether any file opened so far had a picture to size the project by. */
+    const hadVideo = Object.values(store.project.sources).some(sourceHasVideo)
+
     const sourceId = crypto.randomUUID()
     registerSourceFile(sourceId, file)
 
     try {
       const geometry = await playerRef.current!.probeSource(sourceId, file)
 
-      // The composition defaults to the FIRST source and is then the user's;
-      // later files letterbox into it rather than redefining it.
-      if (isFirstSource) {
+      // The composition defaults to the first source WITH A PICTURE and is
+      // then the user's; later files letterbox into it rather than redefining
+      // it. A piece of music has no shape to offer, so it never sets one.
+      if (!hadVideo && geometry.hasVideo) {
         store.setComposition({ width: geometry.width, height: geometry.height })
       }
 
@@ -738,6 +817,12 @@ export default function App() {
   const selectedText = selectedSegment
     ? textContent(selectedSegment)
     : undefined
+  /** A segment nobody looks at has no transform worth showing. */
+  const selectedDraws = selectedSegment?.content.kind !== 'audio'
+  /** A segment nobody hears has no volume worth showing. */
+  const selectedHasSound = selectedSegment
+    ? soundContent(selectedSegment) !== undefined
+    : false
 
   /** Zooms so the whole timeline fits the visible strip. */
   function fitZoom() {
@@ -831,7 +916,9 @@ export default function App() {
             <li key={source.id} data-testid="media-item">
               <span data-testid="media-name">{source.name}</span>{' '}
               <span className="media-meta">
-                {source.width} x {source.height}
+                {sourceHasVideo(source)
+                  ? `${source.width} x ${source.height}`
+                  : 'audio only'}
               </span>{' '}
               <button
                 type="button"
@@ -952,6 +1039,13 @@ export default function App() {
               onClick={() => addTrack('text')}
             >
               + text row
+            </button>{' '}
+            <button
+              type="button"
+              data-testid="add-audio-track"
+              onClick={() => addTrack('audio')}
+            >
+              + audio row
             </button>
           </div>
           <ul className="track-list" data-testid="track-list">
@@ -1088,69 +1182,22 @@ export default function App() {
 
         </section>
 
-        {selectedSegment && selectedSegmentId && (
+        {selectedSegment && selectedSegmentId && selectedDraws && (
           <section className="panel" data-testid="transform-panel">
             <h2 className="panel-title">Transform</h2>
             <div className="transform-form">
-              {TRANSFORM_FIELDS.map((field) => {
-                const offsetMicros = offsetIn(selectedSegment, currentMicros)
-                const animated = isPropertyAnimated(
-                  selectedSegment,
-                  field.property,
-                )
-                const keyed = hasKeyframeAt(
-                  selectedSegment,
-                  field.property,
-                  offsetMicros,
-                )
-                const value = transformAt(selectedSegment, currentMicros)[
-                  field.property
-                ]
-
-                return (
-                  <label key={field.property} className="transform-field">
-                    <span className="transform-label">{field.label}</span>
-                    <input
-                      type="number"
-                      step={field.step}
-                      min={field.min}
-                      max={field.max}
-                      data-testid={`transform-${field.property}`}
-                      value={Math.round(value * 1000) / 1000}
-                      onBlur={() =>
-                        useTimelineStore.getState().endCoalescing()
-                      }
-                      onChange={(event) =>
-                        setTransformValue(
-                          field.property,
-                          Number(event.target.value),
-                        )
-                      }
-                    />
-                    <button
-                      type="button"
-                      className={
-                        keyed
-                          ? 'keyframe-toggle is-keyed'
-                          : animated
-                            ? 'keyframe-toggle is-animated'
-                            : 'keyframe-toggle'
-                      }
-                      title={
-                        keyed
-                          ? 'Remove the keyframe at the playhead'
-                          : 'Add a keyframe at the playhead'
-                      }
-                      data-testid={`keyframe-${field.property}`}
-                      data-keyed={keyed ? 'true' : 'false'}
-                      onClick={() => toggleKeyframe(field.property)}
-                    >
-                      {keyed ? '\u25c6' : '\u25c7'}
-                    </button>
-                  </label>
-                )
-              })}
+              {TRANSFORM_FIELDS.map(propertyField)}
             </div>
+          </section>
+        )}
+
+        {selectedSegment && selectedSegmentId && selectedHasSound && (
+          <section className="panel" data-testid="levels-panel">
+            <h2 className="panel-title">Audio</h2>
+            <div className="transform-form">{LEVEL_FIELDS.map(propertyField)}</div>
+            <p className="panel-note">
+              1 is the clip as recorded, 0 is silent. Keyframe it to fade.
+            </p>
           </section>
         )}
 

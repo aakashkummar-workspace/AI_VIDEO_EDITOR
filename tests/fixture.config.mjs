@@ -58,6 +58,24 @@ export const FIXTURE_TONES_44K = {
 }
 
 /**
+ * A fixture with NO PICTURE AT ALL: a piece of music, in other words.
+ *
+ * `frames: 0` is what makes it audio-only. Importing one of these is the whole
+ * point of an audio row, and it exercises the paths that must not assume every
+ * source has a video track.
+ */
+export const FIXTURE_MUSIC = {
+  path: 'tests/fixtures/music-only.mp4',
+  frames: 0,
+  width: 0,
+  height: 0,
+  fps: 30,
+  seconds: 4,
+  audioSampleRate: 48_000,
+  toneHz: [220, 330, 440, 550],
+}
+
+/**
  * Timestamp to seek to in order to land on `goldenFrame`. Aiming at the middle
  * of the frame's interval keeps the seek robust against rounding in the muxed
  * timestamps.

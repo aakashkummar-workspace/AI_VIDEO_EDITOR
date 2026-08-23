@@ -33,7 +33,6 @@ import {
   type Source,
   type Track,
   type TrackKind,
-  type Transform,
 } from './types'
 
 /**
@@ -159,21 +158,21 @@ function parseKeyframes(value: unknown, what: string): Keyframe[] {
   return parsed.sort((a, b) => a.offsetMicros - b.offsetMicros)
 }
 
-function parseTransform(
+function parseProperties(
   value: unknown,
   what: string,
-): Partial<Transform> | undefined {
+): Partial<Record<AnimatableProperty, number>> | undefined {
   if (value === undefined) return undefined
 
   const raw = record(value, what)
-  const transform: Partial<Transform> = {}
+  const properties: Partial<Record<AnimatableProperty, number>> = {}
 
   for (const property of ANIMATABLE_PROPERTIES) {
     if (raw[property] === undefined) continue
-    transform[property] = num(raw[property], `${what} ${property}`)
+    properties[property] = num(raw[property], `${what} ${property}`)
   }
 
-  return Object.keys(transform).length > 0 ? transform : undefined
+  return Object.keys(properties).length > 0 ? properties : undefined
 }
 
 function parseSegmentKeyframes(
@@ -234,6 +233,15 @@ function parseContent(value: unknown, what: string): SegmentContent {
     }
   }
 
+  if (kind === 'audio') {
+    return {
+      kind: 'audio',
+      sourceId: str(raw.sourceId, `${what} sourceId`),
+      sourceInMicros: micros(raw.sourceInMicros, `${what} in-point`),
+      sourceOutMicros: micros(raw.sourceOutMicros, `${what} out-point`),
+    }
+  }
+
   if (kind === 'text') {
     return {
       kind: 'text',
@@ -260,8 +268,8 @@ function parseSegment(value: unknown, what: string): Segment {
     content: parseContent(raw.content, `${what} content`),
   }
 
-  const transform = parseTransform(raw.transform, `${what} transform`)
-  if (transform) segment.transform = transform
+  const properties = parseProperties(raw.properties, `${what} properties`)
+  if (properties) segment.properties = properties
 
   const keyframes = parseSegmentKeyframes(raw.keyframes, `${what} keyframes`)
   if (keyframes) segment.keyframes = keyframes
@@ -275,7 +283,7 @@ function parseSegment(value: unknown, what: string): Segment {
 function parseTrack(value: unknown, index: number): Track {
   const raw = record(value, `track ${index}`)
   const kind = str(raw.kind, `track ${index} kind`)
-  if (kind !== 'video' && kind !== 'text') {
+  if (kind !== 'video' && kind !== 'text' && kind !== 'audio') {
     fail(`track ${index} is a kind of row this version does not know (${kind}).`)
   }
 
@@ -309,19 +317,19 @@ function assertConsistent(project: Project): void {
       seenSegments.add(segment.id)
 
       const content = segment.content
-      if ((content.kind === 'video') !== (track.kind === 'video')) {
+      if (content.kind !== track.kind) {
         fail(`segment ${segment.id} is on a row that cannot hold it.`)
       }
 
       const duration =
-        content.kind === 'video'
-          ? content.sourceOutMicros - content.sourceInMicros
-          : content.durationMicros
+        content.kind === 'text'
+          ? content.durationMicros
+          : content.sourceOutMicros - content.sourceInMicros
       if (duration < MIN_SEGMENT_MICROS) {
         fail(`segment ${segment.id} has no duration.`)
       }
 
-      if (content.kind === 'video') {
+      if (content.kind !== 'text') {
         if (!project.sources[content.sourceId]) {
           fail(
             `segment ${segment.id} points at a source the draft does not list` +
@@ -334,7 +342,7 @@ function assertConsistent(project: Project): void {
       }
 
       // Only a packed row: a text row is allowed to stack captions.
-      if (track.kind === 'video') {
+      if (track.kind !== 'text') {
         if (segment.timelineStartMicros < previousEnd) {
           fail(`segments overlap on row ${track.id}.`)
         }

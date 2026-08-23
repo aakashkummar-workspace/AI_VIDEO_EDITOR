@@ -46,14 +46,26 @@ const CURSOR_FOR: Record<DragMode, string> = {
   move: 'move',
 }
 
-/** What a block says on it: the file it shows, or the words it draws. */
+/** What a block says on it: the file it plays, or the words it draws. */
 function segmentLabel(project: Project, segment: Segment): string {
   const text = textContent(segment)
   if (text) return text.content
 
   const content = segment.content
-  if (content.kind !== 'video') return segment.id
+  if (content.kind === 'text') return segment.id
   return project.sources[content.sourceId]?.name ?? content.sourceId
+}
+
+/**
+ * The test id a block carries.
+ *
+ * Each kind keeps the name it had when it was its own type: what a user sees
+ * on the row has not changed, only how the model stores it.
+ */
+const TESTID_FOR: Record<string, string> = {
+  video: 'clip',
+  text: 'overlay-block',
+  audio: 'audio-block',
 }
 
 /**
@@ -153,16 +165,14 @@ export default function Timeline({
               const selected = segment.id === selectedId
               const classes = ['timeline-clip']
               if (track.kind === 'text') classes.push('timeline-overlay')
+              if (track.kind === 'audio') classes.push('timeline-audio')
               if (selected) classes.push('is-selected')
 
               return (
                 <div
                   key={segment.id}
                   className={classes.join(' ')}
-                  // The two kinds keep the test ids they had when they were
-                  // separate types: what a user sees on the row has not
-                  // changed, only how the model stores it.
-                  data-testid={track.kind === 'text' ? 'overlay-block' : 'clip'}
+                  data-testid={TESTID_FOR[track.kind] ?? 'clip'}
                   data-segment-id={segment.id}
                   data-track-id={track.id}
                   data-clip-id={track.kind === 'video' ? segment.id : undefined}

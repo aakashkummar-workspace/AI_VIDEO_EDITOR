@@ -7,7 +7,7 @@ import {
   clearKeyframes,
   moveSegment,
   removeKeyframe,
-  setSegmentTransform,
+  setSegmentProperties,
   trimSegmentStart,
   visibleVideoSegmentsAt,
 } from './operations'
@@ -117,7 +117,7 @@ describe('transformAt', () => {
   })
 
   it('uses the fixed transform where there is no animation', () => {
-    const project = setSegmentTransform(oneClip(), {
+    const project = setSegmentProperties(oneClip(), {
       segmentId: 'clip-1',
       scale: 0.5,
       x: 40,
@@ -132,7 +132,7 @@ describe('transformAt', () => {
   })
 
   it('lets an animated property override the fixed one', () => {
-    let project = setSegmentTransform(oneClip(), {
+    let project = setSegmentProperties(oneClip(), {
       segmentId: 'clip-1',
       scale: 0.5,
       opacity: 0.25,
@@ -216,11 +216,11 @@ describe('transformAt', () => {
 
 describe('setSegmentTransform', () => {
   it('changes only the fields it is given', () => {
-    let project = setSegmentTransform(oneClip(), {
+    let project = setSegmentProperties(oneClip(), {
       segmentId: 'clip-1',
       scale: 2,
     })
-    project = setSegmentTransform(project, { segmentId: 'clip-1', x: 15 })
+    project = setSegmentProperties(project, { segmentId: 'clip-1', x: 15 })
 
     expect(transformAt(segmentById(project, 'clip-1'), 1 * SECOND)).toEqual({
       scale: 2,
@@ -231,7 +231,7 @@ describe('setSegmentTransform', () => {
   })
 
   it('clamps opacity to 0..1 and keeps scale above nothing', () => {
-    const project = setSegmentTransform(oneClip(), {
+    const project = setSegmentProperties(oneClip(), {
       segmentId: 'clip-1',
       opacity: 4,
       scale: -3,
@@ -244,7 +244,7 @@ describe('setSegmentTransform', () => {
 
   it('rejects a value that is not a number', () => {
     expect(() =>
-      setSegmentTransform(oneClip(), {
+      setSegmentProperties(oneClip(), {
         segmentId: 'clip-1',
         scale: Number.NaN,
       }),
@@ -253,7 +253,7 @@ describe('setSegmentTransform', () => {
 
   it('rejects an unknown segment', () => {
     expect(() =>
-      setSegmentTransform(oneClip(), { segmentId: 'nope', scale: 1 }),
+      setSegmentProperties(oneClip(), { segmentId: 'nope', scale: 1 }),
     ).toThrow(/No segment/)
   })
 })
@@ -435,7 +435,7 @@ describe('what a transform makes visible', () => {
   })
 
   it('reveals the row beneath as soon as the upper one is scaled down', () => {
-    const project = setSegmentTransform(stacked(), {
+    const project = setSegmentProperties(stacked(), {
       segmentId: 'upper',
       scale: 0.5,
     })
@@ -446,7 +446,7 @@ describe('what a transform makes visible', () => {
   })
 
   it('reveals the row beneath as soon as the upper one is faded', () => {
-    const project = setSegmentTransform(stacked(), {
+    const project = setSegmentProperties(stacked(), {
       segmentId: 'upper',
       opacity: 0.5,
     })
@@ -457,7 +457,7 @@ describe('what a transform makes visible', () => {
   })
 
   it('reveals the row beneath as soon as the upper one is moved', () => {
-    const project = setSegmentTransform(stacked(), {
+    const project = setSegmentProperties(stacked(), {
       segmentId: 'upper',
       y: 30,
     })
@@ -516,7 +516,7 @@ describe('what a transform makes visible', () => {
 
   it('is plain JSON once animated, like everything else', () => {
     const project = addKeyframe(
-      setSegmentTransform(oneClip(), { segmentId: 'clip-1', scale: 2 }),
+      setSegmentProperties(oneClip(), { segmentId: 'clip-1', scale: 2 }),
       {
         segmentId: 'clip-1',
         property: 'scale',

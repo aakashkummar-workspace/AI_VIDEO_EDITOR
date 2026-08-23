@@ -113,7 +113,7 @@ test('a segment with no transform renders exactly as it did before', async ({
   // An explicit identity transform must be a no-op, or every existing frame
   // would shift the day transforms were added.
   await edit(page, (store) => {
-    store.setSegmentTransform({
+    store.setSegmentProperties({
       segmentId: 'clip-0',
       scale: 1,
       x: 0,
@@ -186,7 +186,7 @@ test('scaling a segment down leaves the composition black around it', async ({
 }) => {
   await loadClip(page)
   await edit(page, (store) => {
-    store.setSegmentTransform({ segmentId: 'clip-0', scale: 0.5 })
+    store.setSegmentProperties({ segmentId: 'clip-0', scale: 0.5 })
   })
 
   const scaled = await pixelsAt(page, 2 * SECOND)

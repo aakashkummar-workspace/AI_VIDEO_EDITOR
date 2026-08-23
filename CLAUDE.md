@@ -105,6 +105,25 @@
   one frame per drawn row, so counting items would let memory grow with
   the number of rows while the cap looked unchanged. There is an item
   bound too, because a run of gaps carries no frames at all.
+- Every animatable scalar lives in one place: `segment.properties` for
+  the fixed value and `segment.keyframes` for the curve, resolved by
+  `propertyAt`. Volume is NOT a transform - it moves nothing on screen -
+  but it animates by identical rules, so it is in the same list rather
+  than bolted on beside it. Add the next one there too.
+- Every row that makes a sound is mixed: audio rows and video rows
+  alike, since a clip carries its own audio and a row hidden behind
+  another is still heard. Only text is silent.
+- VOLUME IS APPLIED TO THE SAMPLES, in the worker, as they come out of
+  the decoder. Not to a gain node: live playback schedules buffers and
+  the export renders offline, and two mechanisms would each need their
+  own envelope and could each get it wrong. Scaling the PCM once means
+  there is one answer to how loud something is. It is read per sample
+  when animated, so a fade is a ramp and not a staircase at the packet
+  boundaries.
+- A source with no picture is stored with a width and height of ZERO,
+  which is the honest answer to how big its picture is, and is what
+  `sourceHasVideo` reads. Opening one must never set the composition:
+  a piece of music has no shape to offer.
 - A draft file (`draft.ts`) is data off someone's disk: parse it field
   by field into a fresh object, never cast it. It carries no media, so
   reopening one leaves its sources offline until files are handed back.

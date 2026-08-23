@@ -18,6 +18,7 @@ import {
 } from './operations'
 import {
   DEFAULT_COMPOSITION,
+  MAIN_AUDIO_TRACK_ID,
   MAIN_TEXT_TRACK_ID,
   MAIN_VIDEO_TRACK_ID,
   emptyProject,
@@ -311,10 +312,11 @@ describe('addSegment', () => {
 })
 
 describe('tracks', () => {
-  it('starts with one video row under one text row', () => {
+  it('starts with one row of each kind, sound at the bottom', () => {
     const project = emptyProject()
 
     expect(project.tracks.map((track) => [track.id, track.kind])).toEqual([
+      [MAIN_AUDIO_TRACK_ID, 'audio'],
       [MAIN_VIDEO_TRACK_ID, 'video'],
       [MAIN_TEXT_TRACK_ID, 'text'],
     ])
@@ -338,6 +340,7 @@ describe('tracks', () => {
     const project = removeTrack(oneClip(), MAIN_VIDEO_TRACK_ID)
 
     expect(project.tracks.map((track) => track.id)).toEqual([
+      MAIN_AUDIO_TRACK_ID,
       MAIN_TEXT_TRACK_ID,
     ])
     expect(timelineDuration(project)).toBe(0)
@@ -351,6 +354,7 @@ describe('tracks', () => {
 
     expect(project.tracks.map((track) => track.id)).toEqual([
       MAIN_TEXT_TRACK_ID,
+      MAIN_AUDIO_TRACK_ID,
       MAIN_VIDEO_TRACK_ID,
     ])
   })

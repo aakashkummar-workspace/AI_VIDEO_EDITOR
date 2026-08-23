@@ -25,6 +25,15 @@ declare global {
         height: number
         durationMicros: number
       } | null>
+      addSourceFromUrl(
+        url: string,
+        sourceId: string,
+      ): Promise<{
+        durationMicros: number
+        hasVideo: boolean
+        width: number
+        height: number
+      }>
       loadExported(): Promise<{
         width: number
         height: number

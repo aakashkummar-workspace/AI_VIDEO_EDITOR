@@ -8,6 +8,7 @@
   --text: #dfe3ea;
   --text-dim: #8d95a4;
   --accent: #6ea8fe;
+  --audio: #2f6f4f;
   --clip: #2f4a6d;
   --clip-edge: #4a739f;
   --overlay-clip: #4a3a68;
@@ -343,6 +344,16 @@ input[type='color'] {
 .export-form select {
   width: 100%;
   min-width: 0;
+}
+
+/* Sound has no picture, so its blocks are told apart by colour alone. */
+.timeline-audio {
+  background: var(--audio, #2f6f4f);
+  border-color: #3d8a63;
+}
+
+.timeline-track-audio {
+  min-height: 26px;
 }
 
 .shortcuts dl {

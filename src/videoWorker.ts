@@ -28,6 +28,7 @@ import {
   type DecodedLayers,
 } from './playback'
 import {
+  soundTracks,
   timelineDuration,
   videoTracks,
   visibleVideoSegmentsAt,
@@ -35,11 +36,16 @@ import {
 import {
   exportDimensions,
   exportSettingsOf,
+  isPropertyAnimated,
+  propertyAt,
   segmentCovers,
   segmentEndMicros,
+  soundContent,
   videoContent,
+  volumeAt,
   type ExportQuality,
   type Project,
+  type Segment,
   type Track,
   type VideoContent,
 } from './timeline/types'
@@ -77,7 +83,8 @@ if (scope.name === 'instrumented') {
  */
 type OpenSource = {
   input: Input
-  track: InputVideoTrack
+  /** Null for a file that carries only sound, which is a normal thing to open. */
+  track: InputVideoTrack | null
   audioTrack: InputAudioTrack | null
   geometry: SourceGeometry
 }
@@ -166,10 +173,7 @@ async function openSource(sourceId: string): Promise<OpenSource> {
   })
 
   const track = await input.getPrimaryVideoTrack()
-  if (!track) {
-    throw new Error(`Source ${file.name} has no video track.`)
-  }
-  if (!(await track.canDecode())) {
+  if (track && !(await track.canDecode())) {
     const codec = await track.getCodecParameterString()
     throw new Error(
       `This browser cannot decode the video codec (${codec ?? 'unknown'}).`,
@@ -179,15 +183,28 @@ async function openSource(sourceId: string): Promise<OpenSource> {
   const audioTrack = await input.getPrimaryAudioTrack()
   const audioDecodable = audioTrack ? await audioTrack.canDecode() : false
 
+  // A file with neither is not media this editor can use; a file with only
+  // sound is music, which is exactly what an audio row is for.
+  if (!track && !audioDecodable) {
+    throw new Error(
+      `${file.name} has no video and no audio this browser can decode.`,
+    )
+  }
+
   const opened: OpenSource = {
     input,
     track,
     audioTrack: audioDecodable ? audioTrack : null,
     geometry: {
-      durationMicros: secondsToMicros(await track.computeDuration()),
-      width: await track.getDisplayWidth(),
-      height: await track.getDisplayHeight(),
-      rotation: await track.getRotation(),
+      durationMicros: secondsToMicros(
+        track
+          ? await track.computeDuration()
+          : await audioTrack!.computeDuration(),
+      ),
+      hasVideo: track !== null,
+      width: track ? await track.getDisplayWidth() : 0,
+      height: track ? await track.getDisplayHeight() : 0,
+      rotation: track ? await track.getRotation() : 0,
       audio:
         audioDecodable && audioTrack
           ? {
@@ -270,9 +287,16 @@ async function* walkTrack(
     const sourceMicros =
       content.sourceInMicros + (position - segment.timelineStartMicros)
 
-    const samples = new VideoSampleSink(
-      (await openSource(content.sourceId)).track,
-    ).samples(
+    const opened = await openSource(content.sourceId)
+    if (!opened.track) {
+      // A segment on a video row pointing at a file with no picture. Nothing
+      // to decode, so the row shows a hole for as long as it lasts.
+      yield { timelineMicros: position, segmentId: null, frame: null }
+      position = segmentEnd
+      continue
+    }
+
+    const samples = new VideoSampleSink(opened.track).samples(
       microsToSeconds(sourceMicros),
       microsToSeconds(content.sourceOutMicros),
     )
@@ -449,22 +473,23 @@ function layersOf(item: RenderItem): DecodedLayers {
  * trimming a segment trims its audio exactly rather than to the nearest
  * decoded packet.
  *
- * Every video row is walked, not just the topmost one: a row hidden behind
- * another is still heard. Rows are walked one at a time so the chunks of a
- * single row arrive contiguously, which is what lets the export join them into
- * long runs instead of scheduling a node per packet.
+ * Every row that makes a sound is walked - audio rows and video rows alike,
+ * since a clip carries its own audio and a row hidden behind another is still
+ * heard. Rows are walked one at a time so the chunks of a single row arrive
+ * contiguously, which is what lets the export join them into long runs instead
+ * of scheduling a node per packet.
  */
 async function* walkAudio(
   current: Project,
   fromMicros: number,
   myGeneration: number,
 ): AsyncGenerator<AudioChunk> {
-  for (const segment of videoTracks(current).flatMap(
+  for (const segment of soundTracks(current).flatMap(
     (track) => track.segments,
   )) {
     if (myGeneration !== generation) return
 
-    const content = videoContent(segment)
+    const content = soundContent(segment)
     if (!content) continue
 
     const segmentEnd = segmentEndMicros(segment)
@@ -521,9 +546,12 @@ async function* walkAudio(
             planes.push(plane)
           }
 
+          const chunkStartMicros =
+            segment.timelineStartMicros + (from - content.sourceInMicros)
+          applyVolume(segment, planes, chunkStartMicros, rate)
+
           yield {
-            timelineMicros:
-              segment.timelineStartMicros + (from - content.sourceInMicros),
+            timelineMicros: chunkStartMicros,
             sampleRate: rate,
             planes,
           }
@@ -534,6 +562,43 @@ async function* walkAudio(
     } finally {
       await samples.return()
     }
+  }
+}
+
+/**
+ * Scales decoded samples by the segment's volume, in place.
+ *
+ * Done to the PCM rather than to a gain node in the graph, because live
+ * playback schedules buffers and the export renders offline - two mechanisms
+ * that would each need their own envelope and could each get it wrong. Scaling
+ * the samples once, here, means there is only one answer to how loud something
+ * is.
+ */
+function applyVolume(
+  segment: Segment,
+  planes: Float32Array<ArrayBuffer>[],
+  timelineMicros: number,
+  sampleRate: number,
+): void {
+  if (!isPropertyAnimated(segment, 'volume')) {
+    const gain = propertyAt(segment, 'volume', timelineMicros)
+    if (gain === 1) return
+
+    for (const plane of planes) {
+      for (let i = 0; i < plane.length; i++) plane[i]! *= gain
+    }
+    return
+  }
+
+  // Animated: the gain is read per sample, so a fade is a ramp rather than a
+  // staircase at the packet boundaries.
+  const frames = planes[0]?.length ?? 0
+  for (let i = 0; i < frames; i++) {
+    const gain = volumeAt(
+      segment,
+      timelineMicros + Math.round((i / sampleRate) * 1e6),
+    )
+    for (const plane of planes) plane[i]! *= gain
   }
 }
 
@@ -590,6 +655,8 @@ async function seek(timelineMicros: number, myGeneration: number) {
     for (const { segment, sourceMicros } of wanted) {
       const content = segment.content as VideoContent
       const { track } = await openSource(content.sourceId)
+      if (!track) continue
+
       const sample = await new VideoSampleSink(track).getSample(
         microsToSeconds(sourceMicros),
       )

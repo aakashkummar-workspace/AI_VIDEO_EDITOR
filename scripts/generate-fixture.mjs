@@ -7,6 +7,7 @@ import { chromium } from '@playwright/test'
 import {
   FIXTURE,
   FIXTURE_B,
+  FIXTURE_MUSIC,
   FIXTURE_TONES,
   FIXTURE_TONES_44K,
 } from '../tests/fixture.config.mjs'
@@ -20,7 +21,13 @@ page.on('pageerror', (error) => console.log(`[pageerror] ${error.message}`))
 await page.goto('http://localhost:5173/tests/harness/')
 await page.waitForFunction(() => 'harness' in window)
 
-for (const fixture of [FIXTURE, FIXTURE_B, FIXTURE_TONES, FIXTURE_TONES_44K]) {
+for (const fixture of [
+  FIXTURE,
+  FIXTURE_B,
+  FIXTURE_TONES,
+  FIXTURE_TONES_44K,
+  FIXTURE_MUSIC,
+]) {
   const bytes = await page.evaluate(
     (options) => window.harness.generateFixture(options),
     {
@@ -32,6 +39,7 @@ for (const fixture of [FIXTURE, FIXTURE_B, FIXTURE_TONES, FIXTURE_TONES_44K]) {
       marker: fixture.marker,
       toneHz: fixture.toneHz,
       audioSampleRate: fixture.audioSampleRate,
+      seconds: fixture.seconds,
     },
   )
 

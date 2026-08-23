@@ -9,7 +9,7 @@ import {
   type EffectKeyframeInput,
   type KeyframeInput,
   type MoveSegmentInput,
-  type SegmentTransformInput,
+  type SegmentPropertiesInput,
   type SplitSegmentInput,
   type TextStyleInput,
   type TrimInput,
@@ -61,7 +61,7 @@ export type TimelineStore = {
   splitSegmentAt: (input: SplitSegmentInput) => void
   setTextStyle: (input: TextStyleInput) => void
 
-  setSegmentTransform: (input: SegmentTransformInput) => void
+  setSegmentProperties: (input: SegmentPropertiesInput) => void
   addKeyframe: (input: KeyframeInput) => void
   removeKeyframe: (input: {
     segmentId: string
@@ -212,11 +212,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
      * names the segment and the exact fields, so a slider merges with itself
      * but not with the next control along.
      */
-    setSegmentTransform: (input) =>
+    setSegmentProperties: (input) =>
       apply(
-        mutators.setSegmentTransform,
+        mutators.setSegmentProperties,
         input,
-        `transform:${input.segmentId}:${Object.keys(input)
+        `properties:${input.segmentId}:${Object.keys(input)
           .filter((field) => field !== 'segmentId')
           .sort()
           .join(',')}`,

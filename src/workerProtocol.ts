@@ -57,6 +57,9 @@ export const AUDIO_BUFFER_MAX_CHUNKS = 64
 
 export type SourceGeometry = {
   durationMicros: number
+  /** False for a file that carries only sound, which belongs on an audio row. */
+  hasVideo: boolean
+  /** Zero when there is no picture. */
   width: number
   height: number
   rotation: Rotation

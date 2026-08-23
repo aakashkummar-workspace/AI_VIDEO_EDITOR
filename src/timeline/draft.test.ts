@@ -16,7 +16,7 @@ import {
   addSource,
   addTrack,
   setComposition,
-  setSegmentTransform,
+  setSegmentProperties,
 } from './operations'
 import {
   MAIN_TEXT_TRACK_ID,
@@ -91,7 +91,7 @@ function richProject(): Project {
     },
   })
 
-  project = setSegmentTransform(project, { segmentId: 'clip-2', scale: 0.4 })
+  project = setSegmentProperties(project, { segmentId: 'clip-2', scale: 0.4 })
   project = addKeyframe(project, {
     segmentId: 'clip-2',
     property: 'opacity',
@@ -128,6 +128,18 @@ function draftWith(change: (draft: Record<string, never>) => void): unknown {
   return draft
 }
 
+/**
+ * A row of a draft by id. Rows are addressed by what they are rather than by
+ * index, so adding a kind of row to a new project cannot quietly repoint these
+ * tests at something else.
+ */
+function row(draft: unknown, id: string): any {
+  const tracks = (draft as any).project.tracks as any[]
+  const found = tracks.find((track) => track.id === id)
+  if (!found) throw new Error(`test setup: no track ${id}`)
+  return found
+}
+
 describe('round trip', () => {
   it('comes back exactly as it went in', () => {
     const project = richProject()
@@ -149,7 +161,7 @@ describe('round trip', () => {
       .flatMap((track) => track.segments)
       .find((segment) => segment.id === 'clip-1')!
 
-    expect(clip2.transform).toEqual({ scale: 0.4 })
+    expect(clip2.properties).toEqual({ scale: 0.4 })
     expect(clip2.keyframes!.opacity).toHaveLength(2)
     expect(clip1.effects).toEqual([
       {
@@ -167,6 +179,7 @@ describe('round trip', () => {
 
     expect(draft.project).not.toBe(project)
     expect(draft.project.tracks[0]).not.toBe(project.tracks[0])
+    expect(draft.project.tracks).not.toBe(project.tracks)
   })
 
   it('writes the version it is reading', () => {
@@ -210,7 +223,7 @@ describe('refusing a draft it cannot read', () => {
     const older = draftWith((draft) => {
       ;(draft as Record<string, unknown>).version = 0
     })
-    expect(parseDraft(older).tracks).toHaveLength(3)
+    expect(parseDraft(older).tracks).toHaveLength(4)
   })
 
   it('refuses text that is not JSON', () => {
@@ -227,8 +240,7 @@ describe('refusing a draft it cannot read', () => {
   it('refuses a fractional time', () => {
     expectRefusal(
       draftWith((draft) => {
-        const project = (draft as Record<string, any>).project
-        project.tracks[0].segments[0].timelineStartMicros = 1.5
+        row(draft, MAIN_VIDEO_TRACK_ID).segments[0].timelineStartMicros = 1.5
       }),
       /whole number of microseconds/,
     )
@@ -237,8 +249,7 @@ describe('refusing a draft it cannot read', () => {
   it('refuses a segment pointing at a source that is not there', () => {
     expectRefusal(
       draftWith((draft) => {
-        const project = (draft as Record<string, any>).project
-        project.tracks[0].segments[0].content.sourceId = 'gone'
+        row(draft, MAIN_VIDEO_TRACK_ID).segments[0].content.sourceId = 'gone'
       }),
       /points at a source the draft does not list/,
     )
@@ -247,8 +258,7 @@ describe('refusing a draft it cannot read', () => {
   it('refuses two segments sharing an id', () => {
     expectRefusal(
       draftWith((draft) => {
-        const project = (draft as Record<string, any>).project
-        project.tracks[1].segments[0].id = 'clip-1'
+        row(draft, 'video-2').segments[0].id = 'clip-1'
       }),
       /share the id/,
     )
@@ -257,10 +267,9 @@ describe('refusing a draft it cannot read', () => {
   it('refuses a segment on a row that cannot hold it', () => {
     expectRefusal(
       draftWith((draft) => {
-        const project = (draft as Record<string, any>).project
         // Move the caption onto the video row.
-        const text = project.tracks[2].segments.pop()
-        project.tracks[0].segments.push(text)
+        const text = row(draft, MAIN_TEXT_TRACK_ID).segments.pop()
+        row(draft, MAIN_VIDEO_TRACK_ID).segments.push(text)
       }),
       /cannot hold it|overlap/,
     )
@@ -269,8 +278,7 @@ describe('refusing a draft it cannot read', () => {
   it('refuses overlapping segments on a video row', () => {
     expectRefusal(
       draftWith((draft) => {
-        const project = (draft as Record<string, any>).project
-        project.tracks[0].segments.push({
+        row(draft, MAIN_VIDEO_TRACK_ID).segments.push({
           id: 'clip-3',
           timelineStartMicros: 0,
           content: {
@@ -288,9 +296,8 @@ describe('refusing a draft it cannot read', () => {
   it('refuses a segment with no duration', () => {
     expectRefusal(
       draftWith((draft) => {
-        const project = (draft as Record<string, any>).project
-        project.tracks[0].segments[0].content.sourceOutMicros =
-          project.tracks[0].segments[0].content.sourceInMicros
+        const segments = row(draft, MAIN_VIDEO_TRACK_ID).segments
+        segments[0].content.sourceOutMicros = segments[0].content.sourceInMicros
       }),
       /no duration/,
     )
@@ -299,8 +306,8 @@ describe('refusing a draft it cannot read', () => {
   it('refuses an effect kind it does not know', () => {
     expectRefusal(
       draftWith((draft) => {
-        const project = (draft as Record<string, any>).project
-        project.tracks[0].segments[0].effects[0].kind = 'kaleidoscope'
+        row(draft, MAIN_VIDEO_TRACK_ID).segments[0].effects[0].kind =
+          'kaleidoscope'
       }),
       /effect this version does not know/,
     )
@@ -309,8 +316,7 @@ describe('refusing a draft it cannot read', () => {
   it('refuses a row kind it does not know', () => {
     expectRefusal(
       draftWith((draft) => {
-        const project = (draft as Record<string, any>).project
-        project.tracks[0].kind = 'audio'
+        row(draft, MAIN_VIDEO_TRACK_ID).kind = 'clairvoyance'
       }),
       /row this version does not know/,
     )
@@ -338,13 +344,15 @@ describe('refusing a draft it cannot read', () => {
 describe('what a draft leaves out', () => {
   it('drops fields it does not recognise instead of carrying them through', () => {
     const tampered = draftWith((draft) => {
-      const project = (draft as Record<string, any>).project
-      project.tracks[0].segments[0].somethingElse = 'ignored'
-      project.sources['src-a'].path = '/home/someone/holiday.mp4'
+      row(draft, MAIN_VIDEO_TRACK_ID).segments[0].somethingElse = 'ignored'
+      ;(draft as any).project.sources['src-a'].path = '/home/someone/x.mp4'
     })
 
     const back = parseDraft(tampered)
-    expect(back.tracks[0]!.segments[0]).not.toHaveProperty('somethingElse')
+    const videoRow = back.tracks.find(
+      (track) => track.id === MAIN_VIDEO_TRACK_ID,
+    )!
+    expect(videoRow.segments[0]).not.toHaveProperty('somethingElse')
     expect(back.sources['src-a']).not.toHaveProperty('path')
   })
 
@@ -364,8 +372,7 @@ describe('what a draft leaves out', () => {
 
   it('sorts segments even if the file had them out of order', () => {
     const shuffled = draftWith((draft) => {
-      const project = (draft as Record<string, any>).project
-      project.tracks[0].segments.unshift({
+      row(draft, MAIN_VIDEO_TRACK_ID).segments.unshift({
         id: 'clip-late',
         timelineStartMicros: 5_000_000,
         content: {
@@ -377,10 +384,11 @@ describe('what a draft leaves out', () => {
       })
     })
 
-    expect(parseDraft(shuffled).tracks[0]!.segments.map((s) => s.id)).toEqual([
-      'clip-1',
-      'clip-late',
-    ])
+    expect(
+      parseDraft(shuffled)
+        .tracks.find((track) => track.id === MAIN_VIDEO_TRACK_ID)!
+        .segments.map((s) => s.id),
+    ).toEqual(['clip-1', 'clip-late'])
   })
 })
 

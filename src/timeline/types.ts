@@ -60,7 +60,23 @@ export type TextContent = {
   durationMicros: number
 }
 
-export type SegmentContent = VideoContent | TextContent
+/**
+ * A segment that plays part of a source file and draws nothing.
+ *
+ * The same shape as a video segment, because it is the same idea: a window
+ * onto a source. What differs is only that nobody asks it for a picture.
+ */
+export type AudioContent = {
+  kind: 'audio'
+  sourceId: string
+  sourceInMicros: number
+  sourceOutMicros: number
+}
+
+export type SegmentContent = VideoContent | TextContent | AudioContent
+
+/** Content that plays sound: a clip with an audio track, or audio on its own. */
+export type SoundContent = VideoContent | AudioContent
 
 export type SegmentKind = SegmentContent['kind']
 
@@ -90,15 +106,73 @@ export const IDENTITY_TRANSFORM: Transform = {
   opacity: 1,
 }
 
-/** The transform fields a keyframe may animate. */
-export type AnimatableProperty = keyof Transform
+/**
+ * Every scalar a keyframe may animate.
+ *
+ * Deliberately NOT `keyof Transform`. Volume is not a transform - it changes
+ * nothing about where a segment is drawn - but it animates by exactly the same
+ * rules, on the same clock, through the same UI. Keeping one list of animatable
+ * properties is what stops each new one arriving as its own special case with
+ * its own storage, its own clamping and its own keyframe button.
+ */
+export type AnimatableProperty = 'scale' | 'x' | 'y' | 'opacity' | 'volume'
 
 export const ANIMATABLE_PROPERTIES: AnimatableProperty[] = [
   'scale',
   'x',
   'y',
   'opacity',
+  'volume',
 ]
+
+/** The properties that place a segment on screen. */
+export const TRANSFORM_PROPERTIES: AnimatableProperty[] = [
+  'scale',
+  'x',
+  'y',
+  'opacity',
+]
+
+/** What each property is when nobody has said otherwise. */
+export const PROPERTY_DEFAULTS: Record<AnimatableProperty, number> = {
+  scale: 1,
+  x: 0,
+  y: 0,
+  opacity: 1,
+  volume: 1,
+}
+
+/** What each property is allowed to be. */
+export const PROPERTY_RANGES: Record<
+  AnimatableProperty,
+  { min: number; max: number }
+> = {
+  scale: { min: 0.01, max: 100 },
+  x: { min: -100_000, max: 100_000 },
+  y: { min: -100_000, max: 100_000 },
+  opacity: { min: 0, max: 1 },
+  // Above 1 is a boost. Four is loud enough to be useful and low enough that
+  // a slip of the finger does not blow the mix apart.
+  volume: { min: 0, max: 4 },
+}
+
+/**
+ * Keeps a property inside what it can mean.
+ *
+ * Clamped at the edit rather than guarded at every read, so nothing downstream
+ * has to wonder whether an opacity of 4 or a negative scale is possible.
+ */
+export function clampProperty(
+  property: AnimatableProperty,
+  value: number,
+): number {
+  const range = PROPERTY_RANGES[property]
+  if (!range) throw new Error(`Unknown property ${property}.`)
+  if (!Number.isFinite(value)) {
+    throw new Error(`${property} must be a finite number.`)
+  }
+  return Math.min(range.max, Math.max(range.min, value))
+}
 
 /**
  * One point on a property's curve.
@@ -168,9 +242,9 @@ export type Segment = {
   /** Where the segment's head sits on the timeline. */
   timelineStartMicros: number
   content: SegmentContent
-  /** Fixed transform. Missing fields fall back to identity. */
-  transform?: Partial<Transform>
-  /** Animation, which overrides the fixed transform for the named properties. */
+  /** Fixed values. Missing ones fall back to PROPERTY_DEFAULTS. */
+  properties?: Partial<Record<AnimatableProperty, number>>
+  /** Animation, which overrides the fixed value for the named properties. */
   keyframes?: Keyframes
   /** Applied in order, innermost first, when the segment is drawn. */
   effects?: Effect[]
@@ -184,7 +258,7 @@ export type Segment = {
  * track packs its segments end to end; two captions at once is an ordinary
  * thing to want, so a text track lets them sit on top of one another.
  */
-export type TrackKind = 'video' | 'text'
+export type TrackKind = 'video' | 'text' | 'audio'
 
 export type Track = {
   id: string
@@ -260,19 +334,26 @@ export const OVERLAY_FONT_FAMILY = 'sans-serif'
 /** Used until a source arrives to default it. */
 export const DEFAULT_COMPOSITION: Composition = { width: 1920, height: 1080 }
 
-/** Ids of the two tracks every new project starts with. */
+/** Ids of the three tracks every new project starts with. */
+export const MAIN_AUDIO_TRACK_ID = 'audio-1'
 export const MAIN_VIDEO_TRACK_ID = 'video-1'
 export const MAIN_TEXT_TRACK_ID = 'text-1'
 
 /**
- * A new project already has one video row and one text row. An editor with no
- * rows has nowhere to drop anything, and every project needs both eventually.
+ * A new project already has one row of each kind. An editor with no rows has
+ * nowhere to drop anything, and every project needs all three eventually.
+ *
+ * The audio row is at the bottom of the stack. Nothing is drawn from it, so
+ * where it sits changes no pixels - but the timeline draws the stack top down,
+ * so this is what puts sound under the picture and captions over it, which is
+ * where everyone expects to find them.
  */
 export function emptyProject(): Project {
   return {
     composition: { ...DEFAULT_COMPOSITION },
     sources: {},
     tracks: [
+      { id: MAIN_AUDIO_TRACK_ID, kind: 'audio', segments: [] },
       { id: MAIN_VIDEO_TRACK_ID, kind: 'video', segments: [] },
       { id: MAIN_TEXT_TRACK_ID, kind: 'text', segments: [] },
     ],
@@ -308,17 +389,28 @@ export function exportDimensions(
   return { width, height }
 }
 
-/** Whether segments on a track of this kind may sit on top of one another. */
+/**
+ * Whether segments on a track of this kind may sit on top of one another.
+ *
+ * Only text. A video row shows one picture at a time and an audio row plays
+ * one thing at a time; two of either at once means two rows, which is both
+ * what CapCut does and what makes the trim rules mean something.
+ */
 export function trackAllowsOverlap(kind: TrackKind): boolean {
   return kind === 'text'
 }
 
-/** How long a segment runs on the timeline. Derived for video, stored for text. */
+/**
+ * How long a segment runs on the timeline.
+ *
+ * Derived from the source range for anything with a source; only text stores a
+ * duration, because it has no source to derive one from.
+ */
 export function segmentDuration(segment: Segment): number {
   const content = segment.content
-  return content.kind === 'video'
-    ? content.sourceOutMicros - content.sourceInMicros
-    : content.durationMicros
+  return content.kind === 'text'
+    ? content.durationMicros
+    : content.sourceOutMicros - content.sourceInMicros
 }
 
 /** Exclusive end of a segment on the timeline. */
@@ -382,24 +474,42 @@ export function valueAt(
  * call this from inside the one render function, so an animation cannot play
  * differently in the two.
  */
+export function propertyAt(
+  segment: Segment,
+  property: AnimatableProperty,
+  timelineMicros: number,
+): number {
+  const base = segment.properties?.[property] ?? PROPERTY_DEFAULTS[property]
+  const curve = segment.keyframes?.[property]
+  if (!curve || curve.length === 0) return base
+
+  return clampProperty(
+    property,
+    valueAt(curve, timelineMicros - segment.timelineStartMicros, base),
+  )
+}
+
 export function transformAt(
   segment: Segment,
   timelineMicros: number,
 ): Transform {
-  const base: Transform = { ...IDENTITY_TRANSFORM, ...segment.transform }
-  const keyframes = segment.keyframes
-  if (!keyframes) return base
-
-  const offsetMicros = timelineMicros - segment.timelineStartMicros
-  const resolved = { ...base }
-
-  for (const property of ANIMATABLE_PROPERTIES) {
-    const curve = keyframes[property]
-    if (!curve || curve.length === 0) continue
-    resolved[property] = valueAt(curve, offsetMicros, base[property])
+  return {
+    scale: propertyAt(segment, 'scale', timelineMicros),
+    x: propertyAt(segment, 'x', timelineMicros),
+    y: propertyAt(segment, 'y', timelineMicros),
+    opacity: propertyAt(segment, 'opacity', timelineMicros),
   }
+}
 
-  return resolved
+/**
+ * How loud a segment is at a moment, as a multiplier on its samples.
+ *
+ * Applied to the PCM as it comes out of the decoder rather than to a node in
+ * the graph, so live playback and the offline export mix are scaled by the
+ * same arithmetic instead of by two different mechanisms that have to agree.
+ */
+export function volumeAt(segment: Segment, timelineMicros: number): number {
+  return propertyAt(segment, 'volume', timelineMicros)
 }
 
 /** Keeps an effect amount inside what its kind allows. */
@@ -513,9 +623,35 @@ export function occludesEverything(
   )
 }
 
-/** Narrows a segment to a video one, or undefined if it is text. */
+/**
+ * Whether a source has a picture at all.
+ *
+ * A file with only sound is stored with a width and height of zero, which is
+ * the honest answer to how big its picture is.
+ */
+export function sourceHasVideo(source: Source): boolean {
+  return source.width > 0 && source.height > 0
+}
+
+/** Narrows a segment to a video one, or undefined if it is anything else. */
 export function videoContent(segment: Segment): VideoContent | undefined {
   return segment.content.kind === 'video' ? segment.content : undefined
+}
+
+/** Narrows a segment to an audio one, or undefined if it is anything else. */
+export function audioContent(segment: Segment): AudioContent | undefined {
+  return segment.content.kind === 'audio' ? segment.content : undefined
+}
+
+/**
+ * The source window of anything that makes a sound.
+ *
+ * A video segment carries its own audio, so it counts: muting a clip and
+ * lowering a piece of music are the same operation on the same kind of thing.
+ */
+export function soundContent(segment: Segment): SoundContent | undefined {
+  const content = segment.content
+  return content.kind === 'text' ? undefined : content
 }
 
 /** Narrows a segment to a text one, or undefined if it is video. */

@@ -49,16 +49,15 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByTestId('clip')).toBeVisible()
 })
 
-test('a new project starts with one video row under one text row', async ({
-  page,
-}) => {
+test('a new project starts with one row of each kind', async ({ page }) => {
   expect((await tracks(page)).map((track) => track.kind)).toEqual([
+    'audio',
     'video',
     'text',
   ])
 
   // Listed top of the stack first, the way they are drawn.
-  await expect(page.getByTestId('track-item')).toHaveCount(2)
+  await expect(page.getByTestId('track-item')).toHaveCount(3)
   await expect(page.getByTestId('track-item').first()).toHaveAttribute(
     'data-track-kind',
     'text',
@@ -69,8 +68,13 @@ test('a row can be added and shows up on the timeline', async ({ page }) => {
   await page.getByTestId('add-video-track').click()
 
   const after = await tracks(page)
-  expect(after.map((track) => track.kind)).toEqual(['video', 'text', 'video'])
-  await expect(page.getByTestId('track')).toHaveCount(3)
+  expect(after.map((track) => track.kind)).toEqual([
+    'audio',
+    'video',
+    'text',
+    'video',
+  ])
+  await expect(page.getByTestId('track')).toHaveCount(4)
 })
 
 test('a row can be removed, taking what is on it', async ({ page }) => {
@@ -83,7 +87,10 @@ test('a row can be removed, taking what is on it', async ({ page }) => {
     .and(page.locator(`[data-track-id="${videoTrackId}"]`))
     .click()
 
-  expect((await tracks(page)).map((track) => track.kind)).toEqual(['text'])
+  expect((await tracks(page)).map((track) => track.kind)).toEqual([
+    'audio',
+    'text',
+  ])
   await expect(page.getByTestId('clip')).toHaveCount(0)
 })
 
@@ -108,8 +115,10 @@ test('removing a row is one undo step and comes back whole', async ({
 test('a clip can be dragged onto another video row', async ({ page }) => {
   await page.getByTestId('add-video-track').click()
   const rows = await tracks(page)
-  const upper = rows[2]!.id
-  const lower = rows[0]!.id
+  // The row just added is the topmost video row; the clip is on the first.
+  const videoRows = rows.filter((track) => track.kind === 'video')
+  const upper = videoRows[1]!.id
+  const lower = videoRows[0]!.id
 
   const clip = (await page.getByTestId('clip').boundingBox())!
   const target = (await page

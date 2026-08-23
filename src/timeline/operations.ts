@@ -6,6 +6,7 @@ import {
   exportSettingsOf,
   MIN_SEGMENT_MICROS,
   clampEffectAmount,
+  clampProperty,
   findSegment,
   occludesEverything,
   segmentCovers,
@@ -23,9 +24,9 @@ import {
   type EffectKind,
   type ExportSettings,
   type Keyframes,
+  type SoundContent,
   type Track,
   type TrackKind,
-  type Transform,
   type VideoContent,
 } from './types'
 
@@ -113,9 +114,14 @@ function assertNoOverlap(track: Track, candidate: Segment): void {
   }
 }
 
-/** The kind of track a piece of content belongs on. */
+/**
+ * The kind of track a piece of content belongs on.
+ *
+ * One for one: a video segment goes on a video row, audio on an audio row,
+ * text on a text row. Nothing is allowed to be placed anywhere else.
+ */
 function trackKindFor(content: SegmentContent): TrackKind {
-  return content.kind === 'video' ? 'video' : 'text'
+  return content.kind
 }
 
 function assertSegmentIdFree(project: Project, segmentId: string): void {
@@ -136,7 +142,14 @@ function assertPlaceable(project: Project, segment: Segment): void {
 
   const content = segment.content
 
-  if (content.kind === 'video') {
+  if (content.kind === 'text') {
+    assertIntegerMicros(content.durationMicros, 'durationMicros')
+    if (content.sizePx <= 0) {
+      throw new Error('A text segment must have a positive size.')
+    }
+  } else {
+    // Video and audio are the same idea - a window onto a source - so they are
+    // checked the same way.
     assertIntegerMicros(content.sourceInMicros, 'sourceInMicros')
     assertIntegerMicros(content.sourceOutMicros, 'sourceOutMicros')
 
@@ -149,11 +162,6 @@ function assertPlaceable(project: Project, segment: Segment): void {
         `Segment range ${content.sourceInMicros}..${content.sourceOutMicros}us` +
           ` falls outside source ${source.id} (0..${source.durationMicros}us).`,
       )
-    }
-  } else {
-    assertIntegerMicros(content.durationMicros, 'durationMicros')
-    if (content.sizePx <= 0) {
-      throw new Error('A text segment must have a positive size.')
     }
   }
 
@@ -195,8 +203,8 @@ export type SplitSegmentInput = {
   trackId?: string
 }
 
-/** A fixed transform change. Absent fields are left as they were. */
-export type SegmentTransformInput = {
+/** A fixed property change. Absent fields are left as they were. */
+export type SegmentPropertiesInput = {
   segmentId: string
 } & Partial<Record<AnimatableProperty, number>>
 
@@ -229,24 +237,6 @@ export type EffectKeyframeInput = {
   effectId: string
   offsetMicros: number
   value: number
-}
-
-/**
- * Keeps a transform value inside what it can mean.
- *
- * Opacity outside 0..1 and a scale of zero or less have no rendering, so they
- * are clamped at the edit rather than guarded against at every read.
- */
-function clampTransformValue(
-  property: AnimatableProperty,
-  value: number,
-): number {
-  if (!Number.isFinite(value)) {
-    throw new Error(`${property} must be a finite number.`)
-  }
-  if (property === 'opacity') return Math.min(1, Math.max(0, value))
-  if (property === 'scale') return Math.max(0.01, value)
-  return value
 }
 
 /** The editable look of a text segment: everything except when it plays. */
@@ -433,7 +423,7 @@ export const mutators = {
     const earliestStart = previous ? segmentEndMicros(previous) : 0
     const content = segment.content
 
-    if (content.kind === 'video') {
+    if (content.kind !== 'text') {
       const requested = args.timelineMicros - segment.timelineStartMicros
       const minDelta = Math.max(
         -content.sourceInMicros,
@@ -471,7 +461,7 @@ export const mutators = {
     const requestedDuration =
       Math.min(args.timelineMicros, latestEnd) - segment.timelineStartMicros
 
-    if (content.kind === 'video') {
+    if (content.kind !== 'text') {
       const source = requireSource(project, content.sourceId)
       const maxDuration = source.durationMicros - content.sourceInMicros
       const duration = Math.min(
@@ -507,20 +497,22 @@ export const mutators = {
   },
 
   /**
-   * Sets the fixed transform of a segment. Only the fields given change, so
+   * Sets the fixed properties of a segment. Only the fields given change, so
    * nudging x does not reset a scale set earlier.
    */
-  setSegmentTransform(project: Project, args: SegmentTransformInput): void {
+  setSegmentProperties(project: Project, args: SegmentPropertiesInput): void {
     const { segment } = requireSegment(project, args.segmentId)
-    const next: Partial<Transform> = { ...segment.transform }
+    const next: Partial<Record<AnimatableProperty, number>> = {
+      ...segment.properties,
+    }
 
     for (const property of ANIMATABLE_PROPERTIES) {
       const value = args[property]
       if (value === undefined) continue
-      next[property] = clampTransformValue(property, value)
+      next[property] = clampProperty(property, value)
     }
 
-    segment.transform = next
+    segment.properties = next
   },
 
   /**
@@ -540,7 +532,7 @@ export const mutators = {
     }
 
     const { segment } = requireSegment(project, args.segmentId)
-    const value = clampTransformValue(args.property, args.value)
+    const value = clampProperty(args.property, args.value)
 
     const keyframes: Keyframes = segment.keyframes ?? {}
     const curve = [...(keyframes[args.property] ?? [])]
@@ -734,21 +726,20 @@ export const mutators = {
       const content = segment.content
 
       let secondContent: SegmentContent
-      if (content.kind === 'video') {
-        const cutAtSource = content.sourceInMicros + offset
-        secondContent = {
-          kind: 'video',
-          sourceId: content.sourceId,
-          sourceInMicros: cutAtSource,
-          sourceOutMicros: content.sourceOutMicros,
-        }
-        content.sourceOutMicros = cutAtSource
-      } else {
+      if (content.kind === 'text') {
         secondContent = {
           ...content,
           durationMicros: content.durationMicros - offset,
         }
         content.durationMicros = offset
+      } else {
+        const cutAtSource = content.sourceInMicros + offset
+        secondContent = {
+          ...(content as SoundContent),
+          sourceInMicros: cutAtSource,
+          sourceOutMicros: content.sourceOutMicros,
+        }
+        content.sourceOutMicros = cutAtSource
       }
 
       track.segments.splice(index + 1, 0, {
@@ -810,11 +801,11 @@ export const splitSegmentAt = (
   input: SplitSegmentInput,
 ): Project => produce(project, (draft) => mutators.splitSegmentAt(draft, input))
 
-export const setSegmentTransform = (
+export const setSegmentProperties = (
   project: Project,
-  args: SegmentTransformInput,
+  args: SegmentPropertiesInput,
 ): Project =>
-  produce(project, (draft) => mutators.setSegmentTransform(draft, args))
+  produce(project, (draft) => mutators.setSegmentProperties(draft, args))
 
 export const addKeyframe = (project: Project, args: KeyframeInput): Project =>
   produce(project, (draft) => mutators.addKeyframe(draft, args))
@@ -862,6 +853,23 @@ export const removeEffectKeyframe = (
 /** The video rows, bottom of the stack first. */
 export function videoTracks(project: Project): Track[] {
   return project.tracks.filter((track) => track.kind === 'video')
+}
+
+/**
+ * The rows that make a sound, bottom of the stack first.
+ *
+ * Video rows count: a clip carries its own audio, and muting one is the same
+ * operation as lowering a piece of music.
+ */
+export function soundTracks(project: Project): Track[] {
+  return project.tracks.filter(
+    (track) => track.kind === 'video' || track.kind === 'audio',
+  )
+}
+
+/** The audio rows, bottom of the stack first. */
+export function audioTracks(project: Project): Track[] {
+  return project.tracks.filter((track) => track.kind === 'audio')
 }
 
 /** The text rows, bottom of the stack first. */
