@@ -5,6 +5,27 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>video-editor</title>
+    <!--
+      A light-mode user would otherwise see one dark frame: the stylesheet
+      paints a bare :root dark, and React cannot set the attribute until after
+      the first paint. src/ui/theme.ts is the source of truth for the key and
+      for what the three preferences mean; this only resolves them early.
+    -->
+    <script>
+      try {
+        var pref = localStorage.getItem('video-editor:theme') || 'dark'
+        document.documentElement.dataset.theme =
+          pref === 'system'
+            ? matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light'
+            : pref === 'light'
+              ? 'light'
+              : 'dark'
+      } catch (error) {
+        document.documentElement.dataset.theme = 'dark'
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

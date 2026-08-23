@@ -229,5 +229,18 @@
   Opening a draft clears the undo history - undoing across it would
   walk into a timeline the user has closed.
 
+- Every colour in the UI comes from a token in the two palettes at the top of
+  `src/index.css`. There is exactly one hex outside them - the letterbox behind
+  the picture, which stays `#000` in both themes because `renderFrame`
+  composites onto black and a letterbox that followed the theme would disagree
+  with the exported file. Adding a hex anywhere else silently breaks light
+  mode; add a token instead.
+- The theme is a preference about the EDITOR, so it lives in this browser and
+  never travels in a draft (`tests/theme.spec.ts` pins that). Dark is the
+  default rather than "follow the system": a bright surround makes footage look
+  darker and flatter than it is. `src/ui/theme.ts` is the one place the
+  "system" preference becomes a colour - the stylesheet knows only `dark` and
+  `light`, so the light palette is never written out twice.
+
 # Stack
 Vite + React + TypeScript, pixi.js, mediabunny, zustand + immer

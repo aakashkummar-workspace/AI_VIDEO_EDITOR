@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { createPlayer } from './player'
+import { ThemeSelect } from './ui/ThemeSelect'
 import { exportFileName, formatMicros } from './playback'
 import {
   applyDrag,
@@ -1129,6 +1130,8 @@ export default function App() {
         </button>{' '}
         <span data-testid="zoom">{Math.round(pixelsPerSecond)} px/s</span>
         </div>
+
+        <ThemeSelect />
 
         <div className="draft-controls">
           <button type="button" data-testid="save-draft" onClick={saveDraft}>

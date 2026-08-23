@@ -1,23 +1,90 @@
-:root {
-  --bg: #16181d;
-  --bg-panel: #1d2027;
-  --bg-raised: #262a33;
-  --bg-input: #12141a;
-  --line: #333945;
-  --line-soft: #2a2f39;
-  --text: #dfe3ea;
-  --text-dim: #8d95a4;
-  --accent: #6ea8fe;
-  --audio: #2f6f4f;
-  --clip: #2f4a6d;
-  --clip-edge: #4a739f;
-  --overlay-clip: #4a3a68;
-  --overlay-edge: #7a63a8;
-  --playhead: #ff5a5f;
-  --danger: #ff7b80;
+/*
+ * Two palettes, one set of names.
+ *
+ * Every colour in the application comes from this block. The rest of the
+ * stylesheet names tokens and never a hex, which is what makes a second theme
+ * a palette rather than a rewrite.
+ *
+ * Dark is what a bare :root wears, so a document with no data-theme on it -
+ * the first paint, before any script has run - is already the default. See
+ * src/ui/theme.ts for why dark is the default and not "follow the system".
+ */
+:root,
+:root[data-theme='dark'] {
+  --bg: #000000;
+  --bg-panel: #0b0c0e;
+  --bg-raised: #17181c;
+  --bg-hover: #22242a;
+  --bg-input: #050506;
+  --line: #2a2b31;
+  --line-soft: #1c1d22;
+  --line-strong: #3c3e46;
+  --text: #f2f3f5;
+  --text-dim: #85878f;
+  --accent: #00e08a;
+  --playhead: #ff3b57;
+  --danger: #ff6b7d;
+
+  --clip: #14202e;
+  --clip-deep: #0e1722;
+  --clip-edge: #33587f;
+  --clip-text: #cfe0f5;
+  --overlay-clip: #1f1830;
+  --overlay-clip-deep: #161022;
+  --overlay-edge: #4b3a72;
+  --audio: #0f2b1e;
+  --audio-edge: #1d5c3f;
+
+  /* The hatching over a transition, and the shadow under the picture. Both
+     are drawn ON the theme rather than in it, so both have to flip: white
+     stripes vanish on a white timeline. */
+  --hatch: rgb(255 255 255 / 22%);
+  --hatch-soft: rgb(255 255 255 / 5%);
+  --hatch-edge: rgb(255 255 255 / 35%);
+  --stage-shadow: rgb(0 0 0 / 55%);
 
   color-scheme: dark;
 }
+
+/*
+ * Light. Worth having for daylight and for anyone who wants it, and honestly
+ * the worse surround for judging a picture - the accent is the same green as
+ * the dark palette, darkened until it holds its own against white, because a
+ * pair of themes has to read as one product in two moods.
+ */
+:root[data-theme='light'] {
+  --bg: #f4f5f7;
+  --bg-panel: #ffffff;
+  --bg-raised: #eceef1;
+  --bg-hover: #dfe3e9;
+  --bg-input: #ffffff;
+  --line: #d8dce2;
+  --line-soft: #e6e9ee;
+  --line-strong: #b9c0ca;
+  --text: #1c1f26;
+  --text-dim: #5d6470;
+  --accent: #00875a;
+  --playhead: #e11d48;
+  --danger: #c2213f;
+
+  --clip: #d3e2f5;
+  --clip-deep: #bed3ee;
+  --clip-edge: #7ba4d8;
+  --clip-text: #1b2c3f;
+  --overlay-clip: #e0d3f2;
+  --overlay-clip-deep: #cfbce8;
+  --overlay-edge: #a688d0;
+  --audio: #d2ecdd;
+  --audio-edge: #74b894;
+
+  --hatch: rgb(0 0 0 / 20%);
+  --hatch-soft: rgb(0 0 0 / 5%);
+  --hatch-edge: rgb(0 0 0 / 32%);
+  --stage-shadow: rgb(0 0 0 / 18%);
+
+  color-scheme: light;
+}
+
 
 * {
   box-sizing: border-box;
@@ -41,8 +108,8 @@ button {
 }
 
 button:hover:not(:disabled) {
-  background: #30353f;
-  border-color: #454c5a;
+  background: var(--bg-hover);
+  border-color: var(--line-strong);
 }
 
 button:disabled {
@@ -254,11 +321,11 @@ input[type='color'] {
 }
 
 .keyframe-toggle.is-animated {
-  color: var(--accent, #6ea8fe);
+  color: var(--accent);
 }
 
 .keyframe-toggle.is-keyed {
-  color: var(--accent, #6ea8fe);
+  color: var(--accent);
   font-weight: 700;
 }
 
@@ -313,11 +380,30 @@ input[type='color'] {
   gap: 6px;
 }
 
+/* Next to Save and Open rather than in a panel: it belongs to the application,
+   and both columns below are about the project. */
+.theme-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.theme-select select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 3px 4px;
+}
+
 /* The file input itself is hidden; the label is the button. */
 .open-draft {
   display: inline-block;
   padding: 3px 10px;
-  border: 1px solid var(--line, #333);
+  border: 1px solid var(--line);
   border-radius: 4px;
   font-size: 12px;
   color: var(--text);
@@ -384,8 +470,8 @@ input[type='color'] {
 
 /* Sound has no picture, so its blocks are told apart by colour alone. */
 .timeline-audio {
-  background: var(--audio, #2f6f4f);
-  border-color: #3d8a63;
+  background: var(--audio);
+  border-color: var(--audio-edge);
 }
 
 .timeline-track-audio {
@@ -401,10 +487,10 @@ input[type='color'] {
   pointer-events: none;
   background: repeating-linear-gradient(
     45deg,
-    rgba(255, 255, 255, 0.22) 0 4px,
-    rgba(255, 255, 255, 0.05) 4px 8px
+    var(--hatch) 0 4px,
+    var(--hatch-soft) 4px 8px
   );
-  border-right: 1px solid rgba(255, 255, 255, 0.35);
+  border-right: 1px solid var(--hatch-edge);
 }
 
 .rate-preset.is-current {
@@ -527,9 +613,13 @@ input[type='color'] {
 .stage-canvas canvas {
   max-width: 100%;
   max-height: 100%;
+  /* The one colour in this file that is not a token, and stays that way. This
+     is the letterbox around the picture, and renderFrame composites onto black
+     - a letterbox that followed the theme would disagree with the exported
+     file about what the empty part of the frame looks like. */
   background: #000;
   border-radius: 6px;
-  box-shadow: 0 2px 18px rgb(0 0 0 / 55%);
+  box-shadow: 0 2px 18px var(--stage-shadow);
 }
 
 .dock {
@@ -586,7 +676,7 @@ input[type='color'] {
   /* Below the label band. */
   top: 16px;
   bottom: 5px;
-  background: linear-gradient(180deg, var(--clip) 0%, #294060 100%);
+  background: linear-gradient(180deg, var(--clip) 0%, var(--clip-deep) 100%);
   border: 1px solid var(--clip-edge);
   border-radius: 6px;
   overflow: hidden;
@@ -623,7 +713,7 @@ input[type='color'] {
   padding: 3px 8px;
   display: block;
   white-space: nowrap;
-  color: #cfe0f5;
+  color: var(--clip-text);
   pointer-events: none;
 }
 
@@ -635,7 +725,7 @@ input[type='color'] {
 .timeline-overlay {
   top: 4px;
   bottom: 4px;
-  background: linear-gradient(180deg, var(--overlay-clip) 0%, #3b2e54 100%);
+  background: linear-gradient(180deg, var(--overlay-clip) 0%, var(--overlay-clip-deep) 100%);
   border-color: var(--overlay-edge);
 }
 
