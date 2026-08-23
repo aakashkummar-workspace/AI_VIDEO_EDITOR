@@ -1,6 +1,8 @@
 import { textSegmentsAt, visibleVideoSegmentsAt } from './timeline/operations'
 import {
   OVERLAY_FONT_FAMILY,
+  type BlendMode,
+  type Mask,
   filterFor,
   transformAt,
   transitionAlphas,
@@ -161,29 +163,12 @@ export function renderFrame(
     const blend = transitionBlendAt(track, segment, timelineMicros)
     if (blend.alpha <= 0) continue
 
-    const transform = transformAt(segment, timelineMicros)
     const rect = fitRect(source.width, source.height, width, height)
 
-    withTransform(
-      context,
-      { ...transform, opacity: transform.opacity * blend.alpha },
-      { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
-      () => {
-        if (blend.wipeFraction !== null) {
-          // A wipe reveals rather than fades: the incoming picture is drawn
-          // solid, through a window that grows across the composition.
-          context.beginPath()
-          context.rect(0, 0, width * blend.wipeFraction, height)
-          context.clip()
-        }
-
-        context.filter = filterFor(
-          segment.effects,
-          timelineMicros - segment.timelineStartMicros,
-        )
-        drawFrame(context, frame, rect, source.rotation)
-      },
-    )
+    drawSegment(context, project, segment, timelineMicros, blend, {
+      origin: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+      draw: (target) => drawFrame(target, frame, rect, source.rotation),
+    })
   }
 
   // Text sits on top of whatever the picture turned out to be - including
@@ -196,19 +181,195 @@ export function renderFrame(
     // Text scales about its own anchor rather than about a centre: it has no
     // box of its own until it is measured, and holding the corner still is
     // what makes a size change predictable to drag against.
-    withTransform(
+    drawSegment(
       context,
-      transformAt(segment, timelineMicros),
-      { x: text.x, y: text.y },
-      () => {
-        context.filter = filterFor(
-          segment.effects,
-          timelineMicros - segment.timelineStartMicros,
-        )
-        drawText(context, text)
+      project,
+      segment,
+      timelineMicros,
+      { alpha: 1, wipeFraction: null },
+      {
+        origin: { x: text.x, y: text.y },
+        draw: (target) => drawText(target, text),
       },
     )
   }
+}
+
+/**
+ * Draws one segment's content through everything that governs how it lands:
+ * its transform, its effects, its mask, its blend mode, and whatever a
+ * transition is doing to it.
+ *
+ * A segment with none of those takes the direct path and is drawn exactly as
+ * it was before any of this existed - which is what keeps the golden-frame
+ * comparison, and every existing pixel, meaning what they meant.
+ */
+function drawSegment(
+  context: RenderContext,
+  project: Project,
+  segment: Segment,
+  timelineMicros: number,
+  blend: { alpha: number; wipeFraction: number | null },
+  content: {
+    origin: { x: number; y: number }
+    draw: (target: RenderContext) => void
+  },
+): void {
+  const { width, height } = project.composition
+  const transform = transformAt(segment, timelineMicros)
+  const alpha = Math.min(1, transform.opacity * blend.alpha)
+  if (alpha <= 0) return
+
+  const blendMode = segment.blendMode ?? 'normal'
+  const filter = filterFor(
+    segment.effects,
+    timelineMicros - segment.timelineStartMicros,
+  )
+
+  // No mask: straight onto the composition, which is the ordinary case and
+  // the cheap one.
+  if (!segment.mask) {
+    withTransform(context, { ...transform, opacity: alpha }, content.origin, () => {
+      if (blend.wipeFraction !== null) clipWipe(context, width, height, blend.wipeFraction)
+      context.globalCompositeOperation = compositeOperationFor(blendMode)
+      context.filter = filter
+      content.draw(context)
+    })
+    return
+  }
+
+  // Masked: the segment is drawn on its own first, so the mask can cut it
+  // without touching anything already on the composition. Cutting in place
+  // would take the rows underneath with it.
+  const scratch = scratchLayer(context, width, height)
+  if (!scratch) {
+    // No offscreen canvas to be had. Better an unmasked picture than none.
+    withTransform(context, { ...transform, opacity: alpha }, content.origin, () => {
+      if (blend.wipeFraction !== null) clipWipe(context, width, height, blend.wipeFraction)
+      context.globalCompositeOperation = compositeOperationFor(blendMode)
+      context.filter = filter
+      content.draw(context)
+    })
+    return
+  }
+
+  scratch.clearRect(0, 0, width, height)
+  withTransform(
+    scratch,
+    { ...transform, opacity: 1 },
+    content.origin,
+    () => {
+      scratch.filter = filter
+      content.draw(scratch)
+    },
+  )
+  applyMask(scratch, segment.mask)
+
+  context.save()
+  try {
+    if (blend.wipeFraction !== null) clipWipe(context, width, height, blend.wipeFraction)
+    context.globalAlpha = alpha
+    context.globalCompositeOperation = compositeOperationFor(blendMode)
+    context.drawImage(scratch.canvas as CanvasImageSource, 0, 0)
+  } finally {
+    context.restore()
+  }
+}
+
+/** The canvas name for a blend mode. */
+export function compositeOperationFor(mode: BlendMode): GlobalCompositeOperation {
+  return mode === 'normal' ? 'source-over' : (mode as GlobalCompositeOperation)
+}
+
+/** Limits drawing to the part of the frame a wipe has revealed. */
+function clipWipe(
+  context: RenderContext,
+  width: number,
+  height: number,
+  fraction: number,
+): void {
+  context.beginPath()
+  context.rect(0, 0, width * fraction, height)
+  context.clip()
+}
+
+/**
+ * Cuts everything outside a mask out of a layer that has already been drawn.
+ *
+ * `destination-in` keeps what the shape covers and throws the rest away, and
+ * a blur on the shape is what softens the edge - so the feather costs one
+ * filter rather than a gradient per side.
+ */
+export function applyMask(context: RenderContext, mask: Mask): void {
+  context.save()
+  try {
+    context.globalCompositeOperation = mask.inverted
+      ? 'destination-out'
+      : 'destination-in'
+    context.filter =
+      mask.featherPx > 0 ? `blur(${Math.round(mask.featherPx)}px)` : 'none'
+    context.fillStyle = '#ffffff'
+
+    context.beginPath()
+    if (mask.shape === 'ellipse') {
+      context.ellipse(
+        mask.x,
+        mask.y,
+        Math.max(0, mask.width / 2),
+        Math.max(0, mask.height / 2),
+        0,
+        0,
+        Math.PI * 2,
+      )
+    } else {
+      context.rect(
+        mask.x - mask.width / 2,
+        mask.y - mask.height / 2,
+        Math.max(0, mask.width),
+        Math.max(0, mask.height),
+      )
+    }
+    context.fill()
+  } finally {
+    context.restore()
+  }
+}
+
+/**
+ * A composition-sized scratch layer for the given context, made once and
+ * reused.
+ *
+ * Kept in a WeakMap rather than passed in, so renderFrame keeps the signature
+ * it had: the buffer is an implementation detail of drawing, not part of what
+ * a frame IS. It goes when the context does.
+ */
+const scratchLayers = new WeakMap<
+  RenderContext,
+  { canvas: OffscreenCanvas; context: OffscreenCanvasRenderingContext2D }
+>()
+
+function scratchLayer(
+  context: RenderContext,
+  width: number,
+  height: number,
+): OffscreenCanvasRenderingContext2D | null {
+  const existing = scratchLayers.get(context)
+  if (
+    existing &&
+    existing.canvas.width === width &&
+    existing.canvas.height === height
+  ) {
+    return existing.context
+  }
+
+  if (typeof OffscreenCanvas === 'undefined') return null
+
+  const canvas = new OffscreenCanvas(width, height)
+  const scratch = canvas.getContext('2d')
+  if (!scratch) return null
+
+  scratchLayers.set(context, { canvas, context: scratch })
+  return scratch
 }
 
 /**

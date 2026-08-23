@@ -10,6 +10,7 @@ import {
   type KeyframeInput,
   type MoveSegmentInput,
   type SegmentPropertiesInput,
+  type MaskInput,
   type SplitSegmentInput,
   type TextStyleInput,
   type TransitionInput,
@@ -18,6 +19,7 @@ import {
 import {
   emptyProject,
   type AnimatableProperty,
+  type BlendMode,
   type Composition,
   type ExportSettings,
   type Project,
@@ -61,6 +63,12 @@ export type TimelineStore = {
   trimSegmentEnd: (input: TrimInput) => void
   splitSegmentAt: (input: SplitSegmentInput) => void
   setSegmentRate: (input: { segmentId: string; rate: number }) => void
+  setSegmentBlendMode: (input: {
+    segmentId: string
+    blendMode: BlendMode
+  }) => void
+  setSegmentMask: (input: MaskInput) => void
+  removeSegmentMask: (segmentId: string) => void
   setTransition: (input: TransitionInput) => void
   removeTransition: (segmentId: string) => void
   setTextStyle: (input: TextStyleInput) => void
@@ -197,6 +205,20 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     trimSegmentStart: (input) => apply(mutators.trimSegmentStart, input),
     trimSegmentEnd: (input) => apply(mutators.trimSegmentEnd, input),
     splitSegmentAt: (input) => apply(mutators.splitSegmentAt, input),
+    setSegmentBlendMode: (input) =>
+      apply(mutators.setSegmentBlendMode, input),
+    /** Dragging a mask handle is one edit, like every other drag. */
+    setSegmentMask: (input) =>
+      apply(
+        mutators.setSegmentMask,
+        input,
+        `mask:${input.segmentId}:${Object.keys(input)
+          .filter((field) => field !== 'segmentId')
+          .sort()
+          .join(',')}`,
+      ),
+    removeSegmentMask: (segmentId) =>
+      apply(mutators.removeSegmentMask, segmentId),
     /** Dragging a speed slider is one edit, like every other slider. */
     setSegmentRate: (input) =>
       apply(mutators.setSegmentRate, input, `rate:${input.segmentId}`),

@@ -5,6 +5,8 @@ import {
   EXPORT_QUALITIES,
   exportSettingsOf,
   MIN_SEGMENT_MICROS,
+  BLEND_MODES,
+  MASK_SHAPES,
   TRANSITION_KINDS,
   clampEffectAmount,
   clampProperty,
@@ -28,8 +30,11 @@ import {
   type AnimatableProperty,
   type Effect,
   type EffectKind,
+  type BlendMode,
   type ExportSettings,
   type Keyframes,
+  type Mask,
+  type MaskShape,
   type SoundContent,
   type TransitionKind,
   type Track,
@@ -259,6 +264,17 @@ export type EffectAmountInput = {
   segmentId: string
   effectId: string
   amount: number
+}
+
+export type MaskInput = {
+  segmentId: string
+  shape?: MaskShape
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  featherPx?: number
+  inverted?: boolean
 }
 
 export type TransitionInput = {
@@ -856,6 +872,76 @@ export const mutators = {
     }
   },
 
+  /** Sets how a segment combines with what is under it. */
+  setSegmentBlendMode(
+    project: Project,
+    args: { segmentId: string; blendMode: BlendMode },
+  ): void {
+    if (!BLEND_MODES.includes(args.blendMode)) {
+      throw new Error(`Unknown blend mode ${args.blendMode}.`)
+    }
+
+    const { segment } = requireSegment(project, args.segmentId)
+    if (args.blendMode === 'normal') {
+      delete segment.blendMode
+      return
+    }
+
+    segment.blendMode = args.blendMode
+  },
+
+  /**
+   * Sets the mask on a segment, creating one if there was none.
+   *
+   * A mask that has just appeared covers the middle half of the composition,
+   * so it is somewhere findable rather than nowhere. Only the fields given
+   * change after that.
+   */
+  setSegmentMask(project: Project, args: MaskInput): void {
+    const { segment } = requireSegment(project, args.segmentId)
+
+    if (args.shape !== undefined && !MASK_SHAPES.includes(args.shape)) {
+      throw new Error(`Unknown mask shape ${args.shape}.`)
+    }
+
+    const { width, height } = project.composition
+    const existing: Mask = segment.mask ?? {
+      shape: args.shape ?? 'rectangle',
+      x: Math.round(width / 2),
+      y: Math.round(height / 2),
+      width: Math.round(width / 2),
+      height: Math.round(height / 2),
+      featherPx: 0,
+      inverted: false,
+    }
+
+    const next: Mask = { ...existing }
+    if (args.shape !== undefined) next.shape = args.shape
+    for (const field of ['x', 'y', 'width', 'height', 'featherPx'] as const) {
+      const value = args[field]
+      if (value === undefined) continue
+      if (!Number.isFinite(value)) {
+        throw new Error(`A mask ${field} must be a finite number.`)
+      }
+      next[field] = Math.round(value)
+    }
+    if (args.inverted !== undefined) next.inverted = args.inverted
+
+    if (next.width <= 0 || next.height <= 0) {
+      throw new Error('A mask must have a positive width and height.')
+    }
+    if (next.featherPx < 0) {
+      throw new Error('A mask cannot have a negative feather.')
+    }
+
+    segment.mask = next
+  },
+
+  removeSegmentMask(project: Project, segmentId: string): void {
+    const { segment } = requireSegment(project, segmentId)
+    delete segment.mask
+  },
+
   /** Takes a transition off, giving back the time it was costing. */
   removeTransition(project: Project, segmentId: string): void {
     const { track, segment, index } = requireSegment(project, segmentId)
@@ -984,6 +1070,21 @@ export const setSegmentRate = (
   args: { segmentId: string; rate: number },
 ): Project =>
   produce(project, (draft) => mutators.setSegmentRate(draft, args))
+
+export const setSegmentBlendMode = (
+  project: Project,
+  args: { segmentId: string; blendMode: BlendMode },
+): Project =>
+  produce(project, (draft) => mutators.setSegmentBlendMode(draft, args))
+
+export const setSegmentMask = (project: Project, args: MaskInput): Project =>
+  produce(project, (draft) => mutators.setSegmentMask(draft, args))
+
+export const removeSegmentMask = (
+  project: Project,
+  segmentId: string,
+): Project =>
+  produce(project, (draft) => mutators.removeSegmentMask(draft, segmentId))
 
 export const setTransition = (
   project: Project,

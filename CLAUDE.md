@@ -159,6 +159,18 @@
   streams: what it is playing, and what is blending into it. Two
   transitions are never allowed to overlap, so two streams is always
   enough - keep that invariant if you add anything here.
+- The 2D canvas already does all fifteen CSS blend modes and
+  destination-in masking, in the worker as well as on the main thread.
+  Measured, not assumed. Only per-pixel work - chroma key, colour LUTs -
+  is a reason to reach for WebGL, and rewriting the one render function
+  is not a thing to do speculatively.
+- A blend mode is a function OF what is underneath and a mask leaves
+  parts of it showing, so `occludesEverything` must refuse both. Get
+  this wrong and a multiply composites against black, which looks
+  nearly right and is not.
+- A mask is cut on a SCRATCH LAYER, never in place: `destination-in` on
+  the composition would take the rows underneath with it. The feather is
+  a blur on the mask shape, not a gradient per side.
 - A draft file (`draft.ts`) is data off someone's disk: parse it field
   by field into a fresh object, never cast it. It carries no media, so
   reopening one leaves its sources offline until files are handed back.

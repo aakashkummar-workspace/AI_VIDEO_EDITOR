@@ -31,8 +31,10 @@ import {
 } from './timeline/sourceRegistry'
 import { useTimelineStore } from './timeline/store'
 import {
+  BLEND_MODES,
   DEFAULT_TRANSITION_MICROS,
   EFFECT_KINDS,
+  MASK_SHAPES,
   EXPORT_HEIGHTS,
   EXPORT_QUALITIES,
   TRANSITION_KINDS,
@@ -52,7 +54,9 @@ import {
   segmentEndMicros,
   textContent,
   type AnimatableProperty,
+  type BlendMode,
   type EffectKind,
+  type MaskShape,
   type TransitionKind,
   type Project,
   type Segment,
@@ -1345,6 +1349,123 @@ export default function App() {
             <div className="transform-form">{LEVEL_FIELDS.map(propertyField)}</div>
             <p className="panel-note">
               1 is the clip as recorded, 0 is silent. Keyframe it to fade.
+            </p>
+          </section>
+        )}
+
+        {selectedSegment && selectedSegmentId && selectedDraws && (
+          <section className="panel" data-testid="compositing-panel">
+            <h2 className="panel-title">Compositing</h2>
+
+            <div className="transform-form">
+              <label className="transform-field">
+                <span className="transform-label">blend</span>
+                <select
+                  data-testid="blend-mode"
+                  value={selectedSegment.blendMode ?? 'normal'}
+                  onChange={(event) =>
+                    useTimelineStore.getState().setSegmentBlendMode({
+                      segmentId: selectedSegmentId,
+                      blendMode: event.target.value as BlendMode,
+                    })
+                  }
+                >
+                  {BLEND_MODES.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {mode}
+                    </option>
+                  ))}
+                </select>
+                <span />
+              </label>
+
+              <label className="transform-field">
+                <span className="transform-label">mask</span>
+                <select
+                  data-testid="mask-shape"
+                  value={selectedSegment.mask?.shape ?? 'none'}
+                  onChange={(event) => {
+                    const store = useTimelineStore.getState()
+                    if (event.target.value === 'none') {
+                      store.removeSegmentMask(selectedSegmentId)
+                      return
+                    }
+                    store.setSegmentMask({
+                      segmentId: selectedSegmentId,
+                      shape: event.target.value as MaskShape,
+                    })
+                  }}
+                >
+                  <option value="none">none</option>
+                  {MASK_SHAPES.map((shape) => (
+                    <option key={shape} value={shape}>
+                      {shape}
+                    </option>
+                  ))}
+                </select>
+                <span />
+              </label>
+
+              {selectedSegment.mask &&
+                (
+                  [
+                    ['x', 'centre x', 1],
+                    ['y', 'centre y', 1],
+                    ['width', 'width', 1],
+                    ['height', 'height', 1],
+                    ['featherPx', 'feather', 1],
+                  ] as const
+                ).map(([field, label, step]) => (
+                  <label key={field} className="transform-field">
+                    <span className="transform-label">{label}</span>
+                    <input
+                      type="number"
+                      step={step}
+                      data-testid={`mask-${field}`}
+                      value={selectedSegment.mask![field]}
+                      onBlur={() => useTimelineStore.getState().endCoalescing()}
+                      onChange={(event) => {
+                        const value = Number(event.target.value)
+                        if (!Number.isFinite(value)) return
+                        try {
+                          useTimelineStore.getState().setSegmentMask({
+                            segmentId: selectedSegmentId,
+                            [field]: value,
+                          })
+                          setError(null)
+                        } catch (err) {
+                          setError(
+                            err instanceof Error ? err.message : String(err),
+                          )
+                        }
+                      }}
+                    />
+                    <span />
+                  </label>
+                ))}
+
+              {selectedSegment.mask && (
+                <label className="transform-field">
+                  <span className="transform-label">invert</span>
+                  <input
+                    type="checkbox"
+                    data-testid="mask-inverted"
+                    checked={selectedSegment.mask.inverted}
+                    onChange={(event) =>
+                      useTimelineStore.getState().setSegmentMask({
+                        segmentId: selectedSegmentId,
+                        inverted: event.target.checked,
+                      })
+                    }
+                  />
+                  <span />
+                </label>
+              )}
+            </div>
+
+            <p className="panel-note">
+              A blend mode reads what is underneath, so a row below is drawn
+              even where this one covers it.
             </p>
           </section>
         )}

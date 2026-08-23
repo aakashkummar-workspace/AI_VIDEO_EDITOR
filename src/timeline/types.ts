@@ -266,6 +266,73 @@ export type Transition = {
   durationMicros: number
 }
 
+/**
+ * How a segment is combined with whatever is already beneath it.
+ *
+ * These are the CSS blend modes, which the canvas implements directly - so
+ * this is a name for something the renderer can already do rather than
+ * anything that has to be computed here. 'normal' is ordinary stacking.
+ */
+export type BlendMode =
+  | 'normal'
+  | 'multiply'
+  | 'screen'
+  | 'overlay'
+  | 'darken'
+  | 'lighten'
+  | 'color-dodge'
+  | 'color-burn'
+  | 'hard-light'
+  | 'soft-light'
+  | 'difference'
+  | 'exclusion'
+  | 'hue'
+  | 'saturation'
+  | 'color'
+  | 'luminosity'
+
+export const BLEND_MODES: BlendMode[] = [
+  'normal',
+  'multiply',
+  'screen',
+  'overlay',
+  'darken',
+  'lighten',
+  'color-dodge',
+  'color-burn',
+  'hard-light',
+  'soft-light',
+  'difference',
+  'exclusion',
+  'hue',
+  'saturation',
+  'color',
+  'luminosity',
+]
+
+export type MaskShape = 'rectangle' | 'ellipse'
+
+export const MASK_SHAPES: MaskShape[] = ['rectangle', 'ellipse']
+
+/**
+ * The part of a segment that is kept.
+ *
+ * Measured in COMPOSITION pixels rather than in the segment's own, so a mask
+ * stays where it was put when the footage behind it is swapped for something
+ * of another shape. `featherPx` softens the edge; `inverted` keeps the outside
+ * instead, which is how you cut a hole in something.
+ */
+export type Mask = {
+  shape: MaskShape
+  /** Centre of the shape. */
+  x: number
+  y: number
+  width: number
+  height: number
+  featherPx: number
+  inverted: boolean
+}
+
 /** One item placed on a track. */
 export type Segment = {
   id: string
@@ -280,6 +347,10 @@ export type Segment = {
   effects?: Effect[]
   /** A blend from the previous segment on the same row into this one. */
   transitionIn?: Transition
+  /** How this segment combines with what is under it. Absent means normal. */
+  blendMode?: BlendMode
+  /** Limits where this segment draws. Absent means all of it. */
+  mask?: Mask
   /**
    * How fast the source plays. 1 is as recorded, 2 twice as fast.
    *
@@ -778,6 +849,14 @@ export function occludesEverything(
 ): boolean {
   const content = videoContent(segment)
   if (!content) return false
+
+  // A blend mode is a function OF what is underneath, and a mask leaves parts
+  // of it showing. Either way the row below has to be drawn, so neither can
+  // ever be treated as hiding it.
+  if (segment.blendMode !== undefined && segment.blendMode !== 'normal') {
+    return false
+  }
+  if (segment.mask) return false
 
   const transform = transformAt(segment, timelineMicros)
   if (transform.opacity < 1 || transform.scale < 1) return false

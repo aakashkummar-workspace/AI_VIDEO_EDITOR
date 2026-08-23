@@ -18,7 +18,9 @@
 import {
   ANIMATABLE_PROPERTIES,
   EFFECT_KINDS,
+  BLEND_MODES,
   EXPORT_QUALITIES,
+  MASK_SHAPES,
   MAX_RATE,
   MIN_RATE,
   MIN_SEGMENT_MICROS,
@@ -34,6 +36,9 @@ import {
   type Segment,
   type SegmentContent,
   type Source,
+  type BlendMode,
+  type Mask,
+  type MaskShape,
   type Track,
   type TrackKind,
   type Transition,
@@ -245,6 +250,49 @@ function parseTransition(
   return { kind: kind as TransitionKind, durationMicros }
 }
 
+function parseBlendMode(
+  value: unknown,
+  what: string,
+): BlendMode | undefined {
+  if (value === undefined) return undefined
+
+  const mode = str(value, what)
+  if (!BLEND_MODES.includes(mode as BlendMode)) {
+    fail(`${what} is a blend mode this version does not know (${mode}).`)
+  }
+
+  return mode === 'normal' ? undefined : (mode as BlendMode)
+}
+
+function parseMask(value: unknown, what: string): Mask | undefined {
+  if (value === undefined) return undefined
+
+  const raw = record(value, what)
+  const shape = str(raw.shape, `${what} shape`)
+  if (!MASK_SHAPES.includes(shape as MaskShape)) {
+    fail(`${what} is a mask shape this version does not know (${shape}).`)
+  }
+
+  const width = num(raw.width, `${what} width`)
+  const height = num(raw.height, `${what} height`)
+  if (width <= 0 || height <= 0) {
+    fail(`${what} has no area.`)
+  }
+
+  const featherPx = num(raw.featherPx, `${what} feather`)
+  if (featherPx < 0) fail(`${what} has a negative feather.`)
+
+  return {
+    shape: shape as MaskShape,
+    x: num(raw.x, `${what} x`),
+    y: num(raw.y, `${what} y`),
+    width,
+    height,
+    featherPx,
+    inverted: raw.inverted === true,
+  }
+}
+
 function parseContent(value: unknown, what: string): SegmentContent {
   const raw = record(value, what)
   const kind = str(raw.kind, `${what} kind`)
@@ -307,6 +355,12 @@ function parseSegment(value: unknown, what: string): Segment {
     `${what} transition`,
   )
   if (transitionIn) segment.transitionIn = transitionIn
+
+  const blendMode = parseBlendMode(raw.blendMode, `${what} blend mode`)
+  if (blendMode) segment.blendMode = blendMode
+
+  const mask = parseMask(raw.mask, `${what} mask`)
+  if (mask) segment.mask = mask
 
   if (raw.rate !== undefined) {
     const rate = num(raw.rate, `${what} rate`)
