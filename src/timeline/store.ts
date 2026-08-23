@@ -10,6 +10,7 @@ import {
   type KeyframeInput,
   type MoveSegmentInput,
   type SegmentPropertiesInput,
+  type ChromaKeyInput,
   type MaskInput,
   type SplitSegmentInput,
   type TextStyleInput,
@@ -69,6 +70,8 @@ export type TimelineStore = {
   }) => void
   setSegmentMask: (input: MaskInput) => void
   removeSegmentMask: (segmentId: string) => void
+  setChromaKey: (input: ChromaKeyInput) => void
+  removeChromaKey: (segmentId: string) => void
   setTransition: (input: TransitionInput) => void
   removeTransition: (segmentId: string) => void
   setTextStyle: (input: TextStyleInput) => void
@@ -219,6 +222,18 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
       ),
     removeSegmentMask: (segmentId) =>
       apply(mutators.removeSegmentMask, segmentId),
+    /** Dragging a tolerance slider is one edit, like every other slider. */
+    setChromaKey: (input) =>
+      apply(
+        mutators.setChromaKey,
+        input,
+        `key:${input.segmentId}:${Object.keys(input)
+          .filter((field) => field !== 'segmentId')
+          .sort()
+          .join(',')}`,
+      ),
+    removeChromaKey: (segmentId) =>
+      apply(mutators.removeChromaKey, segmentId),
     /** Dragging a speed slider is one edit, like every other slider. */
     setSegmentRate: (input) =>
       apply(mutators.setSegmentRate, input, `rate:${input.segmentId}`),

@@ -6,6 +6,7 @@ import {
   exportSettingsOf,
   MIN_SEGMENT_MICROS,
   BLEND_MODES,
+  DEFAULT_CHROMA_KEY,
   FONT_FAMILIES,
   MASK_SHAPES,
   TEXT_ALIGNMENTS,
@@ -33,6 +34,7 @@ import {
   type Effect,
   type EffectKind,
   type BlendMode,
+  type ChromaKey,
   type ExportSettings,
   type Keyframes,
   type Mask,
@@ -278,6 +280,14 @@ export type MaskInput = {
   height?: number
   featherPx?: number
   inverted?: boolean
+}
+
+export type ChromaKeyInput = {
+  segmentId: string
+  color?: string
+  similarity?: number
+  smoothness?: number
+  spill?: number
 }
 
 export type TransitionInput = {
@@ -991,6 +1001,45 @@ export const mutators = {
     segment.mask = next
   },
 
+  /**
+   * Keys a colour out of a segment, starting from a green screen.
+   *
+   * Only the fields given change, so nudging the tolerance does not reset the
+   * colour that was sampled.
+   */
+  setChromaKey(project: Project, args: ChromaKeyInput): void {
+    const { segment } = requireSegment(project, args.segmentId)
+
+    if (segment.content.kind !== 'video') {
+      throw new Error('Only a picture has a colour to key out.')
+    }
+
+    const next: ChromaKey = { ...(segment.chromaKey ?? DEFAULT_CHROMA_KEY) }
+
+    if (args.color !== undefined) {
+      if (!/^#[0-9a-f]{6}$/i.test(args.color)) {
+        throw new Error(`${args.color} is not a colour this can key.`)
+      }
+      next.color = args.color
+    }
+
+    for (const field of ['similarity', 'smoothness', 'spill'] as const) {
+      const value = args[field]
+      if (value === undefined) continue
+      if (!Number.isFinite(value)) {
+        throw new Error(`A key ${field} must be a finite number.`)
+      }
+      next[field] = Math.min(1, Math.max(0, value))
+    }
+
+    segment.chromaKey = next
+  },
+
+  removeChromaKey(project: Project, segmentId: string): void {
+    const { segment } = requireSegment(project, segmentId)
+    delete segment.chromaKey
+  },
+
   removeSegmentMask(project: Project, segmentId: string): void {
     const { segment } = requireSegment(project, segmentId)
     delete segment.mask
@@ -1139,6 +1188,17 @@ export const removeSegmentMask = (
   segmentId: string,
 ): Project =>
   produce(project, (draft) => mutators.removeSegmentMask(draft, segmentId))
+
+export const setChromaKey = (
+  project: Project,
+  args: ChromaKeyInput,
+): Project => produce(project, (draft) => mutators.setChromaKey(draft, args))
+
+export const removeChromaKey = (
+  project: Project,
+  segmentId: string,
+): Project =>
+  produce(project, (draft) => mutators.removeChromaKey(draft, segmentId))
 
 export const setTransition = (
   project: Project,

@@ -41,6 +41,7 @@ import {
 import { useTimelineStore } from './timeline/store'
 import {
   BLEND_MODES,
+  DEFAULT_CHROMA_KEY,
   DEFAULT_TRANSITION_MICROS,
   EFFECT_KINDS,
   FONT_FAMILIES,
@@ -1823,6 +1824,85 @@ export default function App() {
                 </label>
               )}
             </div>
+
+            {videoContent(selectedSegment) && (
+              <>
+                <label className="transform-field">
+                  <span className="transform-label">key out</span>
+                  <select
+                    data-testid="chroma-toggle"
+                    value={selectedSegment.chromaKey ? 'on' : 'off'}
+                    onChange={(event) => {
+                      const store = useTimelineStore.getState()
+                      if (event.target.value === 'off') {
+                        store.removeChromaKey(selectedSegmentId)
+                        return
+                      }
+                      store.setChromaKey({ segmentId: selectedSegmentId })
+                    }}
+                  >
+                    <option value="off">nothing</option>
+                    <option value="on">a colour</option>
+                  </select>
+                  <span />
+                </label>
+
+                {selectedSegment.chromaKey && (
+                  <>
+                    <label className="transform-field">
+                      <span className="transform-label">colour</span>
+                      <input
+                        type="color"
+                        data-testid="chroma-color"
+                        value={selectedSegment.chromaKey.color}
+                        onChange={(event) =>
+                          useTimelineStore.getState().setChromaKey({
+                            segmentId: selectedSegmentId,
+                            color: event.target.value,
+                          })
+                        }
+                      />
+                      <span />
+                    </label>
+
+                    {(
+                      [
+                        ['similarity', 'tolerance'],
+                        ['smoothness', 'softness'],
+                        ['spill', 'despill'],
+                      ] as const
+                    ).map(([field, label]) => (
+                      <label key={field} className="transform-field">
+                        <span className="transform-label">{label}</span>
+                        <input
+                          type="number"
+                          step={0.02}
+                          min={0}
+                          max={1}
+                          data-testid={`chroma-${field}`}
+                          value={
+                            selectedSegment.chromaKey?.[field] ??
+                            DEFAULT_CHROMA_KEY[field]
+                          }
+                          onBlur={() =>
+                            useTimelineStore.getState().endCoalescing()
+                          }
+                          onChange={(event) => {
+                            const value = Number(event.target.value)
+                            if (!Number.isFinite(value)) return
+                            useTimelineStore.getState().setChromaKey({
+                              segmentId: selectedSegmentId,
+                              [field]: value,
+                            })
+                          }}
+                        />
+                        <span />
+                      </label>
+                    ))}
+                  </>
+                )}
+              </>
+            )}
 
             <p className="panel-note">
               A blend mode reads what is underneath, so a row below is drawn

@@ -39,6 +39,7 @@ import {
   type SegmentContent,
   type Source,
   type BlendMode,
+  type ChromaKey,
   type Mask,
   type MaskShape,
   type TextAlign,
@@ -297,6 +298,31 @@ function parseMask(value: unknown, what: string): Mask | undefined {
   }
 }
 
+function parseChromaKey(value: unknown, what: string): ChromaKey | undefined {
+  if (value === undefined) return undefined
+
+  const raw = record(value, what)
+  const color = str(raw.color, `${what} colour`)
+  if (!/^#[0-9a-f]{6}$/i.test(color)) {
+    fail(`${what} names a colour this version cannot key (${color}).`)
+  }
+
+  const key: ChromaKey = {
+    color,
+    similarity: num(raw.similarity, `${what} similarity`),
+    smoothness: num(raw.smoothness, `${what} smoothness`),
+    spill: num(raw.spill, `${what} spill`),
+  }
+
+  for (const field of ['similarity', 'smoothness', 'spill'] as const) {
+    if (key[field] < 0 || key[field] > 1) {
+      fail(`${what} has a ${field} outside 0 to 1.`)
+    }
+  }
+
+  return key
+}
+
 function parseContent(value: unknown, what: string): SegmentContent {
   const raw = record(value, what)
   const kind = str(raw.kind, `${what} kind`)
@@ -406,6 +432,9 @@ function parseSegment(value: unknown, what: string): Segment {
 
   const mask = parseMask(raw.mask, `${what} mask`)
   if (mask) segment.mask = mask
+
+  const chromaKey = parseChromaKey(raw.chromaKey, `${what} key`)
+  if (chromaKey) segment.chromaKey = chromaKey
 
   if (raw.rate !== undefined) {
     const rate = num(raw.rate, `${what} rate`)

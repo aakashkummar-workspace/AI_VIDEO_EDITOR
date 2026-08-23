@@ -58,6 +58,24 @@ export const FIXTURE_TONES_44K = {
 }
 
 /**
+ * A green screen: a flat keying green with a red block moving across it.
+ *
+ * Flat and evenly lit on purpose. A real green screen is neither, and the
+ * shader is built for that, but a test wants an answer it can state exactly:
+ * everything green should go, the red block should stay.
+ */
+export const FIXTURE_GREEN = {
+  path: 'tests/fixtures/green-screen.mp4',
+  frames: 60,
+  width: 320,
+  height: 240,
+  fps: 30,
+  solidColor: '#00b140',
+  markerColor: '#ff2020',
+  marker: 'block',
+}
+
+/**
  * A fixture with NO PICTURE AT ALL: a piece of music, in other words.
  *
  * `frames: 0` is what makes it audio-only. Importing one of these is the whole

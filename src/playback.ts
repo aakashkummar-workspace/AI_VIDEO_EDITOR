@@ -1,3 +1,4 @@
+import { keyFrame } from './gpu'
 import { textSegmentsAt, visibleVideoSegmentsAt } from './timeline/operations'
 import {
   LINE_HEIGHT,
@@ -167,9 +168,23 @@ export function renderFrame(
 
     const rect = fitRect(source.width, source.height, width, height)
 
+    // Per-pixel work happens BEFORE anything else touches the frame: the key
+    // decides which pixels exist, and the transform, mask and blend then act
+    // on what is left. Falling back to the raw frame means a picture with its
+    // background still in it, which beats no picture.
+    const drawable = segment.chromaKey
+      ? (keyFrame(
+          context,
+          frame,
+          source.width,
+          source.height,
+          segment.chromaKey,
+        ) ?? frame)
+      : frame
+
     drawSegment(context, project, segment, timelineMicros, blend, {
       origin: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
-      draw: (target) => drawFrame(target, frame, rect, source.rotation),
+      draw: (target) => drawFrame(target, drawable, rect, source.rotation),
     })
   }
 

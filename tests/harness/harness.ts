@@ -110,6 +110,9 @@ async function generateFixture(options: {
    * decide the length themselves.
    */
   seconds?: number
+  /** A flat background instead of the cycling palette, for a green screen. */
+  solidColor?: string
+  markerColor?: string
 }) {
   const { frames, width, height, fps } = options
   const hueOffset = options.hueOffset ?? 0
@@ -191,10 +194,11 @@ async function generateFixture(options: {
 
   for (let index = 0; index < frames && context && source; index++) {
     // Flat blocks keep the clip small and compress near-losslessly.
-    context.fillStyle = `hsl(${(index * 7 + hueOffset) % 360} 70% 45%)`
+    context.fillStyle =
+      options.solidColor ?? `hsl(${(index * 7 + hueOffset) % 360} 70% 45%)`
     context.fillRect(0, 0, width, height)
 
-    context.fillStyle = '#ffffff'
+    context.fillStyle = options.markerColor ?? '#ffffff'
     if (marker === 'bar') {
       context.fillRect((index * 3) % width, 0, 24, height)
     } else {
@@ -204,6 +208,11 @@ async function generateFixture(options: {
         40,
         40,
       )
+    }
+
+    if (options.solidColor) {
+      await source.add(index / fps, 1 / fps)
+      continue
     }
 
     context.fillStyle = '#000000'

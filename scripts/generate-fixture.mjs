@@ -7,6 +7,7 @@ import { chromium } from '@playwright/test'
 import {
   FIXTURE,
   FIXTURE_B,
+  FIXTURE_GREEN,
   FIXTURE_MUSIC,
   FIXTURE_TONES,
   FIXTURE_TONES_44K,
@@ -27,6 +28,7 @@ for (const fixture of [
   FIXTURE_TONES,
   FIXTURE_TONES_44K,
   FIXTURE_MUSIC,
+  FIXTURE_GREEN,
 ]) {
   const bytes = await page.evaluate(
     (options) => window.harness.generateFixture(options),
@@ -40,6 +42,8 @@ for (const fixture of [
       toneHz: fixture.toneHz,
       audioSampleRate: fixture.audioSampleRate,
       seconds: fixture.seconds,
+      solidColor: fixture.solidColor,
+      markerColor: fixture.markerColor,
     },
   )
 

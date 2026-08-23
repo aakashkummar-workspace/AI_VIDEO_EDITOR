@@ -352,6 +352,32 @@ export const BLEND_MODES: BlendMode[] = [
   'luminosity',
 ]
 
+/**
+ * Which colour is being removed from a segment, and how forgivingly.
+ *
+ * Sits beside the mask rather than among the effects, because it answers the
+ * same question a mask does - which parts of this segment are there at all -
+ * and because an effect here carries a single amount, not four settings and a
+ * colour.
+ */
+export type ChromaKey = {
+  color: string
+  /** How close a pixel's colour must be to count as the key. */
+  similarity: number
+  /** How wide the band between kept and removed is. */
+  smoothness: number
+  /** How much key colour to drain out of what survives. */
+  spill: number
+}
+
+/** A green screen, and settings that key a decently lit one out of the box. */
+export const DEFAULT_CHROMA_KEY: ChromaKey = {
+  color: '#00b140',
+  similarity: 0.4,
+  smoothness: 0.08,
+  spill: 0.5,
+}
+
 export type MaskShape = 'rectangle' | 'ellipse'
 
 export const MASK_SHAPES: MaskShape[] = ['rectangle', 'ellipse']
@@ -393,6 +419,8 @@ export type Segment = {
   blendMode?: BlendMode
   /** Limits where this segment draws. Absent means all of it. */
   mask?: Mask
+  /** Removes a colour from the picture. Absent means keep all of it. */
+  chromaKey?: ChromaKey
   /**
    * How fast the source plays. 1 is as recorded, 2 twice as fast.
    *
@@ -918,6 +946,8 @@ export function occludesEverything(
     return false
   }
   if (segment.mask) return false
+  // A key makes part of the picture transparent, so what is under it shows.
+  if (segment.chromaKey) return false
 
   const transform = transformAt(segment, timelineMicros)
   if (transform.opacity < 1 || transform.scale < 1) return false

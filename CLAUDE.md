@@ -171,6 +171,18 @@
 - A mask is cut on a SCRATCH LAYER, never in place: `destination-in` on
   the composition would take the rows underneath with it. The feather is
   a blur on the mask shape, not a gradient per side.
+- Per-pixel work runs as a PRE-PASS in `gpu.ts`, never by rewriting the
+  render function. A frame goes through a shader, comes back as
+  something `drawImage` accepts, and renderFrame draws it exactly as it
+  draws a decoded frame - so the transform, mask, blend mode,
+  transitions and text keep working untouched. Measure before reaching
+  for a renderer rewrite: blend modes, masks and keying were all
+  claimed to need one and none of them did.
+- The GL context is cached PER OWNER, one for the preview thread and one
+  for the export worker. Browsers drop the oldest context once a page
+  holds a dozen, so one per frame exhausts them within a second.
+- No WebGL is not an error. Draw the frame unkeyed: a picture with its
+  background still in it beats no picture at all.
 - SCOPE decides which column a control is in: the left column is the
   project, the right one is whatever is selected. A panel that belongs
   to neither - an authoring action like "add a caption" - is a project
