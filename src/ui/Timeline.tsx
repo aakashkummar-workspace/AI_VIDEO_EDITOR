@@ -9,28 +9,30 @@ import {
   zoomAround,
   ZOOM_STEP,
 } from '../timeline/layout'
-import {
-  clipZoneAt,
-  type DragMode,
-  type DragTarget,
-} from '../timeline/dragging'
+import { segmentZoneAt, type DragMode } from '../timeline/dragging'
 import { timelineDuration } from '../timeline/operations'
-import { clipDuration, type Project } from '../timeline/types'
+import {
+  segmentDuration,
+  textContent,
+  type Project,
+  type Segment,
+  type Track,
+} from '../timeline/types'
 
 export type TimelineProps = {
   project: Project
   /** Playhead position, in timeline microseconds. */
   currentMicros: number
   onSeek: (timelineMicros: number) => void
-  onClipGrab: (
-    itemId: string,
+  onSegmentGrab: (
+    segmentId: string,
     mode: DragMode,
     clientX: number,
-    target: DragTarget,
+    trackId: string,
   ) => void
-  /** Which clip or overlay is selected, if any. */
+  /** Which segment is selected, if any. */
   selectedId?: string | null
-  onSelect?: (id: string | null, target: DragTarget) => void
+  onSelect?: (segmentId: string | null) => void
   /** The playhead head was grabbed, to scrub. */
   onPlayheadGrab?: (clientX: number) => void
   pixelsPerSecond?: number
@@ -44,12 +46,27 @@ const CURSOR_FOR: Record<DragMode, string> = {
   move: 'move',
 }
 
-/** The video track: a ruler, clip blocks, and a playhead. */
+/** What a block says on it: the file it shows, or the words it draws. */
+function segmentLabel(project: Project, segment: Segment): string {
+  const text = textContent(segment)
+  if (text) return text.content
+
+  const content = segment.content
+  if (content.kind !== 'video') return segment.id
+  return project.sources[content.sourceId]?.name ?? content.sourceId
+}
+
+/**
+ * The timeline: a ruler, one row per track, and a playhead.
+ *
+ * Rows are drawn top of the stack first, so a track that draws over another in
+ * the composition also sits above it here.
+ */
 export default function Timeline({
   project,
   currentMicros,
   onSeek,
-  onClipGrab,
+  onSegmentGrab,
   pixelsPerSecond = DEFAULT_PIXELS_PER_SECOND,
   onZoom = () => {},
   selectedId = null,
@@ -61,6 +78,7 @@ export default function Timeline({
   const duration = timelineDuration(project)
   const width = trackWidth(duration, pixelsPerSecond)
   const ticks = rulerTicks(duration, pixelsPerSecond)
+  const rows: Track[] = [...project.tracks].reverse()
 
   // Wheel zoom is bound by hand rather than via onWheel, because React attaches
   // wheel listeners passively and a passive listener cannot preventDefault -
@@ -80,8 +98,7 @@ export default function Timeline({
       const next = zoomAround({
         pixelsPerSecond,
         scrollLeft: strip.scrollLeft,
-        cursorOffsetPixels:
-          event.clientX - strip.getBoundingClientRect().left,
+        cursorOffsetPixels: event.clientX - strip.getBoundingClientRect().left,
         factor,
       })
 
@@ -101,7 +118,7 @@ export default function Timeline({
 
   function zoneFor(event: MouseEvent<HTMLDivElement>): DragMode {
     const bounds = event.currentTarget.getBoundingClientRect()
-    return clipZoneAt(event.clientX - bounds.left, bounds.width)
+    return segmentZoneAt(event.clientX - bounds.left, bounds.width)
   }
 
   return (
@@ -124,67 +141,69 @@ export default function Timeline({
           ))}
         </div>
 
-        <div className="timeline-track">
-          {project.videoTrack.clips.map((clip) => (
-            <div
-              key={clip.id}
-              className="timeline-clip"
-              data-testid="clip"
-              data-clip-id={clip.id}
-              style={{
-                left: microsToPixels(clip.timelineStartMicros, pixelsPerSecond),
-                width: microsToPixels(clipDuration(clip), pixelsPerSecond),
-              }}
-              // Set directly rather than through state: the cursor has to
-              // track the pointer, and re-rendering the timeline on every
-              // mousemove to change one style is not worth it.
-              onMouseMove={(event) => {
-                event.currentTarget.style.cursor = CURSOR_FOR[zoneFor(event)]
-              }}
-              onMouseDown={(event) => {
-                event.preventDefault()
-                onSelect(clip.id, 'clip')
-                onClipGrab(clip.id, zoneFor(event), event.clientX, 'clip')
-              }}
-            >
-              <span className="timeline-clip-label">
-                {project.sources[clip.sourceId]?.name ?? clip.sourceId}
-              </span>
-            </div>
-          ))}
-        </div>
+        {rows.map((track) => (
+          <div
+            key={track.id}
+            className={`timeline-track timeline-track-${track.kind}`}
+            data-testid="track"
+            data-track-id={track.id}
+            data-track-kind={track.kind}
+          >
+            {track.segments.map((segment) => {
+              const selected = segment.id === selectedId
+              const classes = ['timeline-clip']
+              if (track.kind === 'text') classes.push('timeline-overlay')
+              if (selected) classes.push('is-selected')
 
-        <div className="timeline-track timeline-overlays">
-          {project.overlays.map((overlay) => (
-            <div
-              key={overlay.id}
-              className={
-                overlay.id === selectedId
-                  ? 'timeline-clip timeline-overlay is-selected'
-                  : 'timeline-clip timeline-overlay'
-              }
-              data-testid="overlay-block"
-              data-overlay-id={overlay.id}
-              style={{
-                left: microsToPixels(
-                  overlay.timelineStartMicros,
-                  pixelsPerSecond,
-                ),
-                width: microsToPixels(overlay.durationMicros, pixelsPerSecond),
-              }}
-              onMouseMove={(event) => {
-                event.currentTarget.style.cursor = CURSOR_FOR[zoneFor(event)]
-              }}
-              onMouseDown={(event) => {
-                event.preventDefault()
-                onSelect(overlay.id, 'overlay')
-                onClipGrab(overlay.id, zoneFor(event), event.clientX, 'overlay')
-              }}
-            >
-              <span className="timeline-clip-label">{overlay.content}</span>
-            </div>
-          ))}
-        </div>
+              return (
+                <div
+                  key={segment.id}
+                  className={classes.join(' ')}
+                  // The two kinds keep the test ids they had when they were
+                  // separate types: what a user sees on the row has not
+                  // changed, only how the model stores it.
+                  data-testid={track.kind === 'text' ? 'overlay-block' : 'clip'}
+                  data-segment-id={segment.id}
+                  data-track-id={track.id}
+                  data-clip-id={track.kind === 'video' ? segment.id : undefined}
+                  data-overlay-id={
+                    track.kind === 'text' ? segment.id : undefined
+                  }
+                  style={{
+                    left: microsToPixels(
+                      segment.timelineStartMicros,
+                      pixelsPerSecond,
+                    ),
+                    width: microsToPixels(
+                      segmentDuration(segment),
+                      pixelsPerSecond,
+                    ),
+                  }}
+                  // Set directly rather than through state: the cursor has to
+                  // track the pointer, and re-rendering the timeline on every
+                  // mousemove to change one style is not worth it.
+                  onMouseMove={(event) => {
+                    event.currentTarget.style.cursor = CURSOR_FOR[zoneFor(event)]
+                  }}
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                    onSelect(segment.id)
+                    onSegmentGrab(
+                      segment.id,
+                      zoneFor(event),
+                      event.clientX,
+                      track.id,
+                    )
+                  }}
+                >
+                  <span className="timeline-clip-label">
+                    {segmentLabel(project, segment)}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        ))}
 
         <div
           className="timeline-playhead"

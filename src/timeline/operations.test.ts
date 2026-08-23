@@ -1,23 +1,32 @@
 import { describe, expect, it } from 'vitest'
 import {
-  addClip,
+  addSegment,
   addSource,
-  clipAt,
+  addTrack,
+  moveSegment,
+  moveTrack,
+  removeSegment,
+  removeTrack,
   setComposition,
-  moveClip,
-  removeClip,
-  splitClipAt,
+  splitSegmentAt,
+  textSegmentsAt,
   timelineDuration,
-  trimClipEnd,
-  trimClipStart,
+  trimSegmentEnd,
+  trimSegmentStart,
+  videoResolutionEndAfter,
+  videoSegmentAt,
 } from './operations'
 import {
   DEFAULT_COMPOSITION,
-  clipDuration,
-  clipEndMicros,
+  MAIN_TEXT_TRACK_ID,
+  MAIN_VIDEO_TRACK_ID,
   emptyProject,
+  segmentDuration,
+  segmentEndMicros,
   type Project,
+  type Segment,
   type Source,
+  type VideoContent,
 } from './types'
 
 const SECOND = 1_000_000
@@ -37,7 +46,34 @@ function projectWithSources(): Project {
   return addSource(addSource(emptyProject(), source), otherSource)
 }
 
-/** A project holding one clip: source 1s..3s, sitting at 0s on the timeline. */
+/** Places a video segment on a row, spelled out the way a caller would. */
+function addClip(
+  project: Project,
+  input: {
+    id: string
+    sourceId: string
+    sourceInMicros: number
+    sourceOutMicros: number
+    timelineStartMicros: number
+    trackId?: string
+  },
+): Project {
+  return addSegment(project, {
+    trackId: input.trackId ?? MAIN_VIDEO_TRACK_ID,
+    segment: {
+      id: input.id,
+      timelineStartMicros: input.timelineStartMicros,
+      content: {
+        kind: 'video',
+        sourceId: input.sourceId,
+        sourceInMicros: input.sourceInMicros,
+        sourceOutMicros: input.sourceOutMicros,
+      },
+    },
+  })
+}
+
+/** A project holding one segment: source 1s..3s, sitting at 0s on the timeline. */
 function oneClip(): Project {
   return addClip(projectWithSources(), {
     id: 'clip-1',
@@ -48,29 +84,68 @@ function oneClip(): Project {
   })
 }
 
-function clips(project: Project) {
-  return project.videoTrack.clips
+function segmentsOn(project: Project, trackId = MAIN_VIDEO_TRACK_ID) {
+  const track = project.tracks.find((candidate) => candidate.id === trackId)
+  if (!track) throw new Error(`test setup: no track ${trackId}`)
+  return track.segments
 }
 
-function clipById(project: Project, id: string) {
-  const clip = clips(project).find((candidate) => candidate.id === id)
-  if (!clip) throw new Error(`test setup: no clip ${id}`)
-  return clip
+/** Shorthand for the main video row, which most of these tests work on. */
+const clips = (project: Project) => segmentsOn(project)
+
+function clipById(project: Project, id: string): Segment {
+  const found = project.tracks
+    .flatMap((track) => track.segments)
+    .find((candidate) => candidate.id === id)
+  if (!found) throw new Error(`test setup: no segment ${id}`)
+  return found
 }
 
-describe('addClip', () => {
-  it('adds a clip whose duration is derived, not stored', () => {
+/** The video half of a segment, for asserting on source ranges. */
+function video(segment: Segment): VideoContent {
+  if (segment.content.kind !== 'video') {
+    throw new Error(`test setup: segment ${segment.id} is not video`)
+  }
+  return segment.content
+}
+
+function textSegment(
+  id: string,
+  timelineStartMicros: number,
+  durationMicros: number,
+): Segment {
+  return {
+    id,
+    timelineStartMicros,
+    content: {
+      kind: 'text',
+      content: 'Hello',
+      x: 10,
+      y: 20,
+      sizePx: 32,
+      color: '#ffffff',
+      durationMicros,
+    },
+  }
+}
+
+describe('addSegment', () => {
+  it('adds a video segment whose duration is derived, not stored', () => {
     const project = oneClip()
     const clip = clipById(project, 'clip-1')
 
     expect(clips(project)).toHaveLength(1)
-    expect(clipDuration(clip)).toBe(2 * SECOND)
+    expect(segmentDuration(clip)).toBe(2 * SECOND)
     expect(Object.keys(clip).sort()).toEqual([
+      'content',
       'id',
+      'timelineStartMicros',
+    ])
+    expect(Object.keys(clip.content).sort()).toEqual([
+      'kind',
       'sourceId',
       'sourceInMicros',
       'sourceOutMicros',
-      'timelineStartMicros',
     ])
   })
 
@@ -89,7 +164,7 @@ describe('addClip', () => {
     expect(before).toEqual(snapshot)
   })
 
-  it('keeps clips sorted by timeline start', () => {
+  it('keeps segments sorted by timeline start', () => {
     let project = oneClip()
     project = addClip(project, {
       id: 'clip-3',
@@ -113,7 +188,7 @@ describe('addClip', () => {
     ])
   })
 
-  it('rejects a clip that would overlap another', () => {
+  it('rejects a segment that would overlap another on the same row', () => {
     const project = oneClip()
 
     expect(() =>
@@ -127,7 +202,7 @@ describe('addClip', () => {
     ).toThrow(/overlap/)
   })
 
-  it('allows a clip that starts exactly where another ends', () => {
+  it('allows a segment that starts exactly where another ends', () => {
     const project = addClip(oneClip(), {
       id: 'clip-2',
       sourceId: source.id,
@@ -151,7 +226,7 @@ describe('addClip', () => {
     ).toThrow(/outside source/)
   })
 
-  it('rejects a zero-length clip', () => {
+  it('rejects a zero-length segment', () => {
     expect(() =>
       addClip(projectWithSources(), {
         id: 'clip-1',
@@ -186,10 +261,110 @@ describe('addClip', () => {
       }),
     ).toThrow(/integer/)
   })
+
+  it('rejects an unknown track', () => {
+    expect(() =>
+      addClip(projectWithSources(), {
+        id: 'clip-1',
+        sourceId: source.id,
+        sourceInMicros: 0,
+        sourceOutMicros: SECOND,
+        timelineStartMicros: 0,
+        trackId: 'nope',
+      }),
+    ).toThrow(/No track/)
+  })
+
+  it('refuses to put a video segment on a text row, or the reverse', () => {
+    expect(() =>
+      addClip(projectWithSources(), {
+        id: 'clip-1',
+        sourceId: source.id,
+        sourceInMicros: 0,
+        sourceOutMicros: SECOND,
+        timelineStartMicros: 0,
+        trackId: MAIN_TEXT_TRACK_ID,
+      }),
+    ).toThrow(/cannot go on a text track/)
+
+    expect(() =>
+      addSegment(projectWithSources(), {
+        trackId: MAIN_VIDEO_TRACK_ID,
+        segment: textSegment('t1', 0, SECOND),
+      }),
+    ).toThrow(/cannot go on a video track/)
+  })
+
+  it('rejects an id already used anywhere in the project', () => {
+    const project = addSegment(oneClip(), {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('text-1', 0, SECOND),
+    })
+
+    expect(() =>
+      addSegment(project, {
+        trackId: MAIN_TEXT_TRACK_ID,
+        segment: textSegment('clip-1', 5 * SECOND, SECOND),
+      }),
+    ).toThrow(/already exists/)
+  })
 })
 
-describe('removeClip', () => {
-  it('removes the clip and leaves the gap', () => {
+describe('tracks', () => {
+  it('starts with one video row under one text row', () => {
+    const project = emptyProject()
+
+    expect(project.tracks.map((track) => [track.id, track.kind])).toEqual([
+      [MAIN_VIDEO_TRACK_ID, 'video'],
+      [MAIN_TEXT_TRACK_ID, 'text'],
+    ])
+  })
+
+  it('adds a row on top by default and at an index when asked', () => {
+    let project = addTrack(emptyProject(), { id: 'video-2', kind: 'video' })
+    expect(project.tracks.at(-1)!.id).toBe('video-2')
+
+    project = addTrack(project, { id: 'video-0', kind: 'video', index: 0 })
+    expect(project.tracks[0]!.id).toBe('video-0')
+  })
+
+  it('rejects a duplicate track id', () => {
+    expect(() =>
+      addTrack(emptyProject(), { id: MAIN_VIDEO_TRACK_ID, kind: 'video' }),
+    ).toThrow(/already exists/)
+  })
+
+  it('removes a row and everything on it', () => {
+    const project = removeTrack(oneClip(), MAIN_VIDEO_TRACK_ID)
+
+    expect(project.tracks.map((track) => track.id)).toEqual([
+      MAIN_TEXT_TRACK_ID,
+    ])
+    expect(timelineDuration(project)).toBe(0)
+  })
+
+  it('reorders a row within the stack', () => {
+    const project = moveTrack(emptyProject(), {
+      trackId: MAIN_TEXT_TRACK_ID,
+      index: 0,
+    })
+
+    expect(project.tracks.map((track) => track.id)).toEqual([
+      MAIN_TEXT_TRACK_ID,
+      MAIN_VIDEO_TRACK_ID,
+    ])
+  })
+
+  it('rejects reordering or removing a row that is not there', () => {
+    expect(() => removeTrack(emptyProject(), 'nope')).toThrow(/No track/)
+    expect(() => moveTrack(emptyProject(), { trackId: 'nope', index: 0 })).toThrow(
+      /No track/,
+    )
+  })
+})
+
+describe('removeSegment', () => {
+  it('removes the segment and leaves the gap', () => {
     let project = addClip(oneClip(), {
       id: 'clip-2',
       sourceId: source.id,
@@ -197,33 +372,33 @@ describe('removeClip', () => {
       sourceOutMicros: SECOND,
       timelineStartMicros: 5 * SECOND,
     })
-    project = removeClip(project, 'clip-1')
+    project = removeSegment(project, 'clip-1')
 
     expect(clips(project).map((clip) => clip.id)).toEqual(['clip-2'])
     expect(clipById(project, 'clip-2').timelineStartMicros).toBe(5 * SECOND)
   })
 
-  it('rejects an unknown clip', () => {
-    expect(() => removeClip(oneClip(), 'nope')).toThrow(/No clip/)
+  it('rejects an unknown segment', () => {
+    expect(() => removeSegment(oneClip(), 'nope')).toThrow(/No segment/)
   })
 })
 
-describe('moveClip', () => {
-  it('moves a clip without changing its source range', () => {
-    const before = clipById(oneClip(), 'clip-1')
-    const project = moveClip(oneClip(), {
-      clipId: 'clip-1',
+describe('moveSegment', () => {
+  it('moves a segment without changing its source range', () => {
+    const before = video(clipById(oneClip(), 'clip-1'))
+    const project = moveSegment(oneClip(), {
+      segmentId: 'clip-1',
       timelineStartMicros: 5 * SECOND,
     })
     const after = clipById(project, 'clip-1')
 
     expect(after.timelineStartMicros).toBe(5 * SECOND)
-    expect(after.sourceInMicros).toBe(before.sourceInMicros)
-    expect(after.sourceOutMicros).toBe(before.sourceOutMicros)
+    expect(video(after).sourceInMicros).toBe(before.sourceInMicros)
+    expect(video(after).sourceOutMicros).toBe(before.sourceOutMicros)
   })
 
-  it('re-sorts when a clip moves past another', () => {
-    const project = moveClip(
+  it('re-sorts when a segment moves past another', () => {
+    const project = moveSegment(
       addClip(oneClip(), {
         id: 'clip-2',
         sourceId: source.id,
@@ -231,13 +406,13 @@ describe('moveClip', () => {
         sourceOutMicros: SECOND,
         timelineStartMicros: 5 * SECOND,
       }),
-      { clipId: 'clip-1', timelineStartMicros: 7 * SECOND },
+      { segmentId: 'clip-1', timelineStartMicros: 7 * SECOND },
     )
 
     expect(clips(project).map((clip) => clip.id)).toEqual(['clip-2', 'clip-1'])
   })
 
-  it('rejects a move that would overlap', () => {
+  it('rejects a move that would overlap on a packed row', () => {
     const project = addClip(oneClip(), {
       id: 'clip-2',
       sourceId: source.id,
@@ -247,55 +422,113 @@ describe('moveClip', () => {
     })
 
     expect(() =>
-      moveClip(project, { clipId: 'clip-2', timelineStartMicros: SECOND }),
+      moveSegment(project, { segmentId: 'clip-2', timelineStartMicros: SECOND }),
     ).toThrow(/overlap/)
   })
 
   it('rejects a negative timeline start', () => {
     expect(() =>
-      moveClip(oneClip(), { clipId: 'clip-1', timelineStartMicros: -1 }),
+      moveSegment(oneClip(), { segmentId: 'clip-1', timelineStartMicros: -1 }),
     ).toThrow(/before the beginning/)
+  })
+
+  it('clamps rather than throwing on a row that allows overlap', () => {
+    const project = moveSegment(
+      addSegment(emptyProject(), {
+        trackId: MAIN_TEXT_TRACK_ID,
+        segment: textSegment('t1', 2 * SECOND, SECOND),
+      }),
+      { segmentId: 't1', timelineStartMicros: -5 * SECOND },
+    )
+
+    expect(clipById(project, 't1').timelineStartMicros).toBe(0)
+  })
+
+  it('moves a segment to another row of the same kind', () => {
+    let project = addTrack(oneClip(), { id: 'video-2', kind: 'video' })
+    project = moveSegment(project, {
+      segmentId: 'clip-1',
+      timelineStartMicros: 3 * SECOND,
+      trackId: 'video-2',
+    })
+
+    expect(segmentsOn(project, MAIN_VIDEO_TRACK_ID)).toHaveLength(0)
+    expect(segmentsOn(project, 'video-2').map((s) => s.id)).toEqual(['clip-1'])
+    expect(clipById(project, 'clip-1').timelineStartMicros).toBe(3 * SECOND)
+  })
+
+  it('lets a segment cross to a row where it would not have fitted', () => {
+    // clip-2 cannot sit at 0s on the main row, but the new row is empty.
+    let project = addClip(oneClip(), {
+      id: 'clip-2',
+      sourceId: source.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 5 * SECOND,
+    })
+    project = addTrack(project, { id: 'video-2', kind: 'video' })
+    project = moveSegment(project, {
+      segmentId: 'clip-2',
+      timelineStartMicros: 0,
+      trackId: 'video-2',
+    })
+
+    expect(segmentsOn(project, 'video-2').map((s) => s.id)).toEqual(['clip-2'])
+    expect(clipById(project, 'clip-2').timelineStartMicros).toBe(0)
+  })
+
+  it('refuses to move a segment onto a row of the wrong kind', () => {
+    expect(() =>
+      moveSegment(oneClip(), {
+        segmentId: 'clip-1',
+        timelineStartMicros: 0,
+        trackId: MAIN_TEXT_TRACK_ID,
+      }),
+    ).toThrow(/cannot go on a text track/)
   })
 })
 
-describe('trimClipStart', () => {
+describe('trimSegmentStart', () => {
   it('moves the head and the source in-point together', () => {
-    const project = trimClipStart(oneClip(), {
-      clipId: 'clip-1',
+    const project = trimSegmentStart(oneClip(), {
+      segmentId: 'clip-1',
       timelineMicros: 500_000,
     })
     const clip = clipById(project, 'clip-1')
 
     expect(clip.timelineStartMicros).toBe(500_000)
-    expect(clip.sourceInMicros).toBe(1_500_000)
-    expect(clip.sourceOutMicros).toBe(3 * SECOND)
-    expect(clipDuration(clip)).toBe(1_500_000)
+    expect(video(clip).sourceInMicros).toBe(1_500_000)
+    expect(video(clip).sourceOutMicros).toBe(3 * SECOND)
+    expect(segmentDuration(clip)).toBe(1_500_000)
   })
 
   it('clamps to the start of the source when dragged too far left', () => {
-    // The clip starts 1s into the source, so it can only extend 1s leftward.
-    const project = trimClipStart(
-      moveClip(oneClip(), { clipId: 'clip-1', timelineStartMicros: 5 * SECOND }),
-      { clipId: 'clip-1', timelineMicros: 0 },
+    // The segment starts 1s into the source, so it can only extend 1s leftward.
+    const project = trimSegmentStart(
+      moveSegment(oneClip(), {
+        segmentId: 'clip-1',
+        timelineStartMicros: 5 * SECOND,
+      }),
+      { segmentId: 'clip-1', timelineMicros: 0 },
     )
     const clip = clipById(project, 'clip-1')
 
-    expect(clip.sourceInMicros).toBe(0)
+    expect(video(clip).sourceInMicros).toBe(0)
     expect(clip.timelineStartMicros).toBe(4 * SECOND)
   })
 
   it('never produces a zero or negative duration', () => {
-    const project = trimClipStart(oneClip(), {
-      clipId: 'clip-1',
+    const project = trimSegmentStart(oneClip(), {
+      segmentId: 'clip-1',
       timelineMicros: 99 * SECOND,
     })
     const clip = clipById(project, 'clip-1')
 
-    expect(clipDuration(clip)).toBe(1)
-    expect(clip.sourceOutMicros).toBe(3 * SECOND)
+    expect(segmentDuration(clip)).toBe(1)
+    expect(video(clip).sourceOutMicros).toBe(3 * SECOND)
   })
 
-  it('clamps to the end of the previous clip', () => {
+  it('clamps to the end of the previous segment', () => {
     let project = projectWithSources()
     project = addClip(project, {
       id: 'first',
@@ -312,51 +545,73 @@ describe('trimClipStart', () => {
       timelineStartMicros: 4 * SECOND,
     })
 
-    project = trimClipStart(project, { clipId: 'second', timelineMicros: 0 })
+    project = trimSegmentStart(project, {
+      segmentId: 'second',
+      timelineMicros: 0,
+    })
     const clip = clipById(project, 'second')
 
     expect(clip.timelineStartMicros).toBe(2 * SECOND)
-    expect(clip.sourceInMicros).toBe(3 * SECOND)
+    expect(video(clip).sourceInMicros).toBe(3 * SECOND)
     expect(clips(project)[0]!.id).toBe('first')
+  })
+
+  it('has no previous segment to stop at on a row that allows overlap', () => {
+    let project = addSegment(emptyProject(), {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('t1', 0, 4 * SECOND),
+    })
+    project = addSegment(project, {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('t2', 3 * SECOND, 2 * SECOND),
+    })
+
+    project = trimSegmentStart(project, {
+      segmentId: 't2',
+      timelineMicros: SECOND,
+    })
+
+    expect(clipById(project, 't2').timelineStartMicros).toBe(SECOND)
+    expect(segmentEndMicros(clipById(project, 't2'))).toBe(5 * SECOND)
   })
 })
 
-describe('trimClipEnd', () => {
-  it('shortens the clip from the tail', () => {
-    const project = trimClipEnd(oneClip(), {
-      clipId: 'clip-1',
+describe('trimSegmentEnd', () => {
+  it('shortens the segment from the tail', () => {
+    const project = trimSegmentEnd(oneClip(), {
+      segmentId: 'clip-1',
       timelineMicros: SECOND,
     })
     const clip = clipById(project, 'clip-1')
 
     expect(clip.timelineStartMicros).toBe(0)
-    expect(clip.sourceInMicros).toBe(SECOND)
-    expect(clip.sourceOutMicros).toBe(2 * SECOND)
+    expect(video(clip).sourceInMicros).toBe(SECOND)
+    expect(video(clip).sourceOutMicros).toBe(2 * SECOND)
   })
 
   it('clamps to the real end of the source', () => {
-    // The clip starts 1s into a 10s source, so it can reach at most 9s long.
-    const project = trimClipEnd(oneClip(), {
-      clipId: 'clip-1',
+    // The segment starts 1s into a 10s source, so it can reach at most 9s long.
+    const project = trimSegmentEnd(oneClip(), {
+      segmentId: 'clip-1',
       timelineMicros: 99 * SECOND,
     })
     const clip = clipById(project, 'clip-1')
 
-    expect(clip.sourceOutMicros).toBe(source.durationMicros)
-    expect(clipEndMicros(clip)).toBe(9 * SECOND)
+    expect(video(clip).sourceOutMicros).toBe(source.durationMicros)
+    expect(segmentEndMicros(clip)).toBe(9 * SECOND)
   })
 
   it('never produces a zero or negative duration', () => {
-    const project = trimClipEnd(oneClip(), {
-      clipId: 'clip-1',
+    const project = trimSegmentEnd(oneClip(), {
+      segmentId: 'clip-1',
       timelineMicros: -5 * SECOND,
     })
 
-    expect(clipDuration(clipById(project, 'clip-1'))).toBe(1)
+    expect(segmentDuration(clipById(project, 'clip-1'))).toBe(1)
   })
 
-  it('clamps to the start of the next clip', () => {
-    const project = trimClipEnd(
+  it('clamps to the start of the next segment', () => {
+    const project = trimSegmentEnd(
       addClip(oneClip(), {
         id: 'clip-2',
         sourceId: source.id,
@@ -364,45 +619,69 @@ describe('trimClipEnd', () => {
         sourceOutMicros: SECOND,
         timelineStartMicros: 4 * SECOND,
       }),
-      { clipId: 'clip-1', timelineMicros: 8 * SECOND },
+      { segmentId: 'clip-1', timelineMicros: 8 * SECOND },
     )
 
-    expect(clipEndMicros(clipById(project, 'clip-1'))).toBe(4 * SECOND)
+    expect(segmentEndMicros(clipById(project, 'clip-1'))).toBe(4 * SECOND)
+  })
+
+  it('grows a text segment past its neighbour, which its row allows', () => {
+    let project = addSegment(emptyProject(), {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('t1', 0, SECOND),
+    })
+    project = addSegment(project, {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('t2', 2 * SECOND, SECOND),
+    })
+
+    project = trimSegmentEnd(project, {
+      segmentId: 't1',
+      timelineMicros: 5 * SECOND,
+    })
+
+    expect(segmentEndMicros(clipById(project, 't1'))).toBe(5 * SECOND)
   })
 })
 
-describe('splitClipAt', () => {
-  it('cuts one clip into two touching halves', () => {
-    const project = splitClipAt(oneClip(), {
+describe('splitSegmentAt', () => {
+  it('cuts one segment into two touching halves', () => {
+    const project = splitSegmentAt(oneClip(), {
       timelineMicros: 500_000,
-      newClipId: 'clip-1b',
+      newSegmentId: 'clip-1b',
     })
     const [first, second] = clips(project)
 
     expect(clips(project)).toHaveLength(2)
     expect(first).toEqual({
       id: 'clip-1',
-      sourceId: source.id,
-      sourceInMicros: SECOND,
-      sourceOutMicros: 1_500_000,
       timelineStartMicros: 0,
+      content: {
+        kind: 'video',
+        sourceId: source.id,
+        sourceInMicros: SECOND,
+        sourceOutMicros: 1_500_000,
+      },
     })
     expect(second).toEqual({
       id: 'clip-1b',
-      sourceId: source.id,
-      sourceInMicros: 1_500_000,
-      sourceOutMicros: 3 * SECOND,
       timelineStartMicros: 500_000,
+      content: {
+        kind: 'video',
+        sourceId: source.id,
+        sourceInMicros: 1_500_000,
+        sourceOutMicros: 3 * SECOND,
+      },
     })
-    expect(clipEndMicros(first!)).toBe(second!.timelineStartMicros)
+    expect(segmentEndMicros(first!)).toBe(second!.timelineStartMicros)
   })
 
   it('preserves total duration', () => {
     const before = timelineDuration(oneClip())
     const after = timelineDuration(
-      splitClipAt(oneClip(), {
+      splitSegmentAt(oneClip(), {
         timelineMicros: 700_000,
-        newClipId: 'clip-1b',
+        newSegmentId: 'clip-1b',
       }),
     )
 
@@ -412,19 +691,70 @@ describe('splitClipAt', () => {
   it('does nothing in empty space', () => {
     const project = oneClip()
     expect(
-      splitClipAt(project, { timelineMicros: 5 * SECOND, newClipId: 'x' }),
+      splitSegmentAt(project, { timelineMicros: 5 * SECOND, newSegmentId: 'x' }),
     ).toEqual(project)
   })
 
-  it('does nothing on a clip boundary, so no empty half is created', () => {
+  it('does nothing on a boundary, so no empty half is created', () => {
     const project = oneClip()
 
     expect(
-      splitClipAt(project, { timelineMicros: 0, newClipId: 'x' }),
+      splitSegmentAt(project, { timelineMicros: 0, newSegmentId: 'x' }),
     ).toEqual(project)
     expect(
-      splitClipAt(project, { timelineMicros: 2 * SECOND, newClipId: 'x' }),
+      splitSegmentAt(project, {
+        timelineMicros: 2 * SECOND,
+        newSegmentId: 'x',
+      }),
     ).toEqual(project)
+  })
+
+  it('cuts a text segment into two halves that share the style', () => {
+    const project = splitSegmentAt(
+      addSegment(emptyProject(), {
+        trackId: MAIN_TEXT_TRACK_ID,
+        segment: textSegment('t1', 0, 4 * SECOND),
+      }),
+      { timelineMicros: SECOND, newSegmentId: 't1b' },
+    )
+
+    expect(segmentDuration(clipById(project, 't1'))).toBe(SECOND)
+    expect(segmentDuration(clipById(project, 't1b'))).toBe(3 * SECOND)
+    expect(clipById(project, 't1b').content).toMatchObject({
+      kind: 'text',
+      content: 'Hello',
+      sizePx: 32,
+    })
+  })
+
+  it('cuts the topmost row that has something under the playhead', () => {
+    let project = addSegment(oneClip(), {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('t1', 0, 4 * SECOND),
+    })
+    project = splitSegmentAt(project, {
+      timelineMicros: SECOND,
+      newSegmentId: 'new',
+    })
+
+    // The text row is above the video row, so that is the one that got cut.
+    expect(segmentsOn(project, MAIN_TEXT_TRACK_ID)).toHaveLength(2)
+    expect(segmentsOn(project, MAIN_VIDEO_TRACK_ID)).toHaveLength(1)
+  })
+
+  it('cuts a named row even when a higher one is covered', () => {
+    let project = addSegment(oneClip(), {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('t1', 0, 4 * SECOND),
+    })
+    project = splitSegmentAt(project, {
+      timelineMicros: SECOND,
+      newSegmentId: 'new',
+      trackId: MAIN_VIDEO_TRACK_ID,
+    })
+
+    expect(segmentsOn(project, MAIN_VIDEO_TRACK_ID)).toHaveLength(2)
+    expect(segmentsOn(project, MAIN_TEXT_TRACK_ID)).toHaveLength(1)
   })
 })
 
@@ -433,7 +763,7 @@ describe('timelineDuration', () => {
     expect(timelineDuration(emptyProject())).toBe(0)
   })
 
-  it('is the end of the last clip, gaps included', () => {
+  it('is the end of the last segment, gaps included', () => {
     const project = addClip(oneClip(), {
       id: 'clip-2',
       sourceId: source.id,
@@ -444,22 +774,33 @@ describe('timelineDuration', () => {
 
     expect(timelineDuration(project)).toBe(6 * SECOND)
   })
+
+  it('counts a caption that runs past the last clip', () => {
+    const project = addSegment(oneClip(), {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('t1', 5 * SECOND, 2 * SECOND),
+    })
+
+    expect(timelineDuration(project)).toBe(7 * SECOND)
+  })
 })
 
-describe('clipAt', () => {
+describe('videoSegmentAt', () => {
   it('maps a timeline position to a source position', () => {
-    const found = clipAt(oneClip(), 500_000)
+    const found = videoSegmentAt(oneClip(), 500_000)
 
-    expect(found?.clip.id).toBe('clip-1')
+    expect(found?.segment.id).toBe('clip-1')
     expect(found?.sourceMicros).toBe(1_500_000)
   })
 
   it('includes the first microsecond and excludes the last', () => {
     const project = oneClip()
 
-    expect(clipAt(project, 0)?.sourceMicros).toBe(SECOND)
-    expect(clipAt(project, 2 * SECOND - 1)?.sourceMicros).toBe(3 * SECOND - 1)
-    expect(clipAt(project, 2 * SECOND)).toBeNull()
+    expect(videoSegmentAt(project, 0)?.sourceMicros).toBe(SECOND)
+    expect(videoSegmentAt(project, 2 * SECOND - 1)?.sourceMicros).toBe(
+      3 * SECOND - 1,
+    )
+    expect(videoSegmentAt(project, 2 * SECOND)).toBeNull()
   })
 
   it('returns null over a gap', () => {
@@ -471,37 +812,149 @@ describe('clipAt', () => {
       timelineStartMicros: 5 * SECOND,
     })
 
-    expect(clipAt(project, 3 * SECOND)).toBeNull()
-    expect(clipAt(project, 5 * SECOND)?.clip.id).toBe('clip-2')
+    expect(videoSegmentAt(project, 3 * SECOND)).toBeNull()
+    expect(videoSegmentAt(project, 5 * SECOND)?.segment.id).toBe('clip-2')
   })
 
-  it('picks the right clip either side of a split', () => {
-    const project = splitClipAt(oneClip(), {
+  it('picks the right segment either side of a split', () => {
+    const project = splitSegmentAt(oneClip(), {
       timelineMicros: SECOND,
-      newClipId: 'clip-1b',
+      newSegmentId: 'clip-1b',
     })
 
-    expect(clipAt(project, SECOND - 1)?.clip.id).toBe('clip-1')
-    expect(clipAt(project, SECOND)?.clip.id).toBe('clip-1b')
+    expect(videoSegmentAt(project, SECOND - 1)?.segment.id).toBe('clip-1')
+    expect(videoSegmentAt(project, SECOND)?.segment.id).toBe('clip-1b')
     // The cut is seamless: the source position runs on unbroken across it.
-    expect(clipAt(project, SECOND - 1)?.sourceMicros).toBe(2 * SECOND - 1)
-    expect(clipAt(project, SECOND)?.sourceMicros).toBe(2 * SECOND)
+    expect(videoSegmentAt(project, SECOND - 1)?.sourceMicros).toBe(
+      2 * SECOND - 1,
+    )
+    expect(videoSegmentAt(project, SECOND)?.sourceMicros).toBe(2 * SECOND)
+  })
+
+  it('the topmost row wins where two overlap in time', () => {
+    let project = addTrack(oneClip(), { id: 'video-2', kind: 'video' })
+    project = addClip(project, {
+      id: 'clip-top',
+      sourceId: otherSource.id,
+      sourceInMicros: 0,
+      sourceOutMicros: SECOND,
+      timelineStartMicros: 0,
+      trackId: 'video-2',
+    })
+
+    expect(videoSegmentAt(project, 0)?.segment.id).toBe('clip-top')
+    // Past the top segment, the row below shows through again.
+    expect(videoSegmentAt(project, 1_500_000)?.segment.id).toBe('clip-1')
+  })
+
+  it('falls through to a lower row when the upper one has a gap', () => {
+    let project = addTrack(oneClip(), { id: 'video-2', kind: 'video' })
+    project = addClip(project, {
+      id: 'clip-top',
+      sourceId: otherSource.id,
+      sourceInMicros: 0,
+      sourceOutMicros: SECOND,
+      timelineStartMicros: 5 * SECOND,
+      trackId: 'video-2',
+    })
+
+    expect(videoSegmentAt(project, 500_000)?.segment.id).toBe('clip-1')
+  })
+})
+
+describe('videoResolutionEndAfter', () => {
+  /** clip-1 covers 0-2s on the main row; the upper row covers 1s-3s. */
+  function stacked(): Project {
+    const project = addTrack(oneClip(), { id: 'video-2', kind: 'video' })
+    return addClip(project, {
+      id: 'upper',
+      sourceId: otherSource.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 1 * SECOND,
+      trackId: 'video-2',
+    })
+  }
+
+  it('is the end of the segment when nothing is above it', () => {
+    expect(videoResolutionEndAfter(oneClip(), 0)).toBe(2 * SECOND)
+  })
+
+  it('stops where a higher row takes over, not at the segment end', () => {
+    // This is what a decoder has to respect: from 1s the upper row is showing,
+    // so walking clip-1 all the way to 2s would decode a hidden row.
+    expect(videoResolutionEndAfter(stacked(), 0)).toBe(1 * SECOND)
+  })
+
+  it('runs to the end of the upper segment once it is the one showing', () => {
+    expect(videoResolutionEndAfter(stacked(), 1 * SECOND)).toBe(3 * SECOND)
+    expect(videoResolutionEndAfter(stacked(), 2_500_000)).toBe(3 * SECOND)
+  })
+
+  it('ignores rows below the one showing', () => {
+    // The lower row starting again changes nothing while the upper one covers.
+    let project = stacked()
+    project = addClip(project, {
+      id: 'clip-2',
+      sourceId: source.id,
+      sourceInMicros: 0,
+      sourceOutMicros: SECOND,
+      timelineStartMicros: 2 * SECOND,
+    })
+
+    expect(videoResolutionEndAfter(project, 1 * SECOND)).toBe(3 * SECOND)
+  })
+
+  it('is null where nothing is showing', () => {
+    expect(videoResolutionEndAfter(oneClip(), 5 * SECOND)).toBeNull()
+    expect(videoResolutionEndAfter(emptyProject(), 0)).toBeNull()
+  })
+})
+
+describe('textSegmentsAt', () => {
+  it('returns every caption showing at a moment, in stack order', () => {
+    let project = addTrack(emptyProject(), { id: 'text-2', kind: 'text' })
+    project = addSegment(project, {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('lower', 0, 4 * SECOND),
+    })
+    project = addSegment(project, {
+      trackId: 'text-2',
+      segment: textSegment('upper', 0, 4 * SECOND),
+    })
+
+    expect(
+      textSegmentsAt(project, SECOND).map((entry) => entry.segment.id),
+    ).toEqual(['lower', 'upper'])
+  })
+
+  it('lets two captions on one row overlap', () => {
+    let project = addSegment(emptyProject(), {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('t1', 0, 4 * SECOND),
+    })
+    project = addSegment(project, {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('t2', 2 * SECOND, 4 * SECOND),
+    })
+
+    expect(textSegmentsAt(project, 3 * SECOND)).toHaveLength(2)
   })
 })
 
 describe('state shape', () => {
   it('stays plain JSON through every operation', () => {
     let project = oneClip()
-    project = splitClipAt(project, {
+    project = splitSegmentAt(project, {
       timelineMicros: SECOND,
-      newClipId: 'clip-1b',
+      newSegmentId: 'clip-1b',
     })
-    project = trimClipEnd(project, {
-      clipId: 'clip-1b',
+    project = trimSegmentEnd(project, {
+      segmentId: 'clip-1b',
       timelineMicros: 1_800_000,
     })
-    project = moveClip(project, {
-      clipId: 'clip-1b',
+    project = moveSegment(project, {
+      segmentId: 'clip-1b',
       timelineStartMicros: 4 * SECOND,
     })
 
@@ -509,22 +962,22 @@ describe('state shape', () => {
   })
 
   it('keeps every time value an integer', () => {
-    const project = trimClipStart(
-      splitClipAt(oneClip(), {
+    const project = trimSegmentStart(
+      splitSegmentAt(oneClip(), {
         timelineMicros: 999_999,
-        newClipId: 'clip-1b',
+        newSegmentId: 'clip-1b',
       }),
-      { clipId: 'clip-1b', timelineMicros: 1_400_001 },
+      { segmentId: 'clip-1b', timelineMicros: 1_400_001 },
     )
 
     for (const clip of clips(project)) {
-      expect(Number.isInteger(clip.sourceInMicros)).toBe(true)
-      expect(Number.isInteger(clip.sourceOutMicros)).toBe(true)
+      expect(Number.isInteger(video(clip).sourceInMicros)).toBe(true)
+      expect(Number.isInteger(video(clip).sourceOutMicros)).toBe(true)
       expect(Number.isInteger(clip.timelineStartMicros)).toBe(true)
     }
   })
 
-  it('never leaves clips overlapping or out of order', () => {
+  it('never leaves segments on a packed row overlapping or out of order', () => {
     let project = oneClip()
     project = addClip(project, {
       id: 'clip-2',
@@ -533,19 +986,19 @@ describe('state shape', () => {
       sourceOutMicros: 2 * SECOND,
       timelineStartMicros: 3 * SECOND,
     })
-    project = splitClipAt(project, {
+    project = splitSegmentAt(project, {
       timelineMicros: 4 * SECOND,
-      newClipId: 'clip-2b',
+      newSegmentId: 'clip-2b',
     })
-    project = trimClipStart(project, {
-      clipId: 'clip-2',
+    project = trimSegmentStart(project, {
+      segmentId: 'clip-2',
       timelineMicros: 3_500_000,
     })
 
     const ordered = clips(project)
     for (let i = 1; i < ordered.length; i++) {
       expect(ordered[i]!.timelineStartMicros).toBeGreaterThanOrEqual(
-        clipEndMicros(ordered[i - 1]!),
+        segmentEndMicros(ordered[i - 1]!),
       )
     }
   })
@@ -566,9 +1019,9 @@ describe('composition', () => {
   })
 
   it('rejects a non-positive or fractional size', () => {
-    expect(() => setComposition(emptyProject(), { width: 0, height: 100 })).toThrow(
-      /positive/,
-    )
+    expect(() =>
+      setComposition(emptyProject(), { width: 0, height: 100 }),
+    ).toThrow(/positive/)
     expect(() =>
       setComposition(emptyProject(), { width: -10, height: 100 }),
     ).toThrow(/positive/)

@@ -2,19 +2,24 @@ import { describe, expect, it } from 'vitest'
 import {
   EDGE_GRAB_PIXELS,
   applyDrag,
-  clampClipStart,
-  clipZoneAt,
+  clampSegmentStart,
   dragPreviewMicros,
   dragToOperation,
   legalStartRange,
+  segmentZoneAt,
 } from './dragging'
-import { addClip, addSource } from './operations'
+import { addSegment, addSource, addTrack } from './operations'
 import {
-  clipDuration,
-  clipEndMicros,
+  MAIN_TEXT_TRACK_ID,
+  MAIN_VIDEO_TRACK_ID,
   emptyProject,
+  findSegment,
+  segmentDuration,
+  segmentEndMicros,
   type Project,
+  type Segment,
   type Source,
+  type VideoContent,
 } from './types'
 
 const SECOND = 1_000_000
@@ -28,11 +33,35 @@ const source: Source = {
   rotation: 0,
 }
 
+function addClip(
+  project: Project,
+  input: {
+    id: string
+    sourceInMicros: number
+    sourceOutMicros: number
+    timelineStartMicros: number
+    trackId?: string
+  },
+): Project {
+  return addSegment(project, {
+    trackId: input.trackId ?? MAIN_VIDEO_TRACK_ID,
+    segment: {
+      id: input.id,
+      timelineStartMicros: input.timelineStartMicros,
+      content: {
+        kind: 'video',
+        sourceId: source.id,
+        sourceInMicros: input.sourceInMicros,
+        sourceOutMicros: input.sourceOutMicros,
+      },
+    },
+  })
+}
+
 /** One clip: source 2s..5s, sitting at 1s on the timeline. */
 function oneClip(): Project {
   return addClip(addSource(emptyProject(), source), {
     id: 'clip-1',
-    sourceId: source.id,
     sourceInMicros: 2 * SECOND,
     sourceOutMicros: 5 * SECOND,
     timelineStartMicros: 1 * SECOND,
@@ -43,14 +72,12 @@ function oneClip(): Project {
 function twoClips(): Project {
   let project = addClip(addSource(emptyProject(), source), {
     id: 'left',
-    sourceId: source.id,
     sourceInMicros: 0,
     sourceOutMicros: 2 * SECOND,
     timelineStartMicros: 0,
   })
   project = addClip(project, {
     id: 'right',
-    sourceId: source.id,
     sourceInMicros: 0,
     sourceOutMicros: 2 * SECOND,
     timelineStartMicros: 5 * SECOND,
@@ -58,38 +85,70 @@ function twoClips(): Project {
   return project
 }
 
-function clipById(project: Project, id: string) {
-  const clip = project.videoTrack.clips.find((candidate) => candidate.id === id)
-  if (!clip) throw new Error(`test setup: no clip ${id}`)
-  return clip
+function clipById(project: Project, id: string): Segment {
+  const found = findSegment(project, id)
+  if (!found) throw new Error(`test setup: no segment ${id}`)
+  return found.segment
 }
 
-describe('clipZoneAt', () => {
+function video(segment: Segment): VideoContent {
+  if (segment.content.kind !== 'video') {
+    throw new Error(`test setup: segment ${segment.id} is not video`)
+  }
+  return segment.content
+}
+
+function segmentsOn(project: Project, trackId: string): Segment[] {
+  const track = project.tracks.find((candidate) => candidate.id === trackId)
+  if (!track) throw new Error(`test setup: no track ${trackId}`)
+  return track.segments
+}
+
+function withCaption(project: Project, id = 'text-1'): Project {
+  return addSegment(project, {
+    trackId: MAIN_TEXT_TRACK_ID,
+    segment: {
+      id,
+      timelineStartMicros: 1 * SECOND,
+      content: {
+        kind: 'text',
+        content: 'Hello',
+        x: 0,
+        y: 0,
+        sizePx: 32,
+        color: '#ffffff',
+        durationMicros: 2 * SECOND,
+      },
+    },
+  })
+}
+
+describe('segmentZoneAt', () => {
   it('grabs the head within the edge margin', () => {
-    expect(clipZoneAt(0, 200)).toBe('trim-start')
-    expect(clipZoneAt(EDGE_GRAB_PIXELS, 200)).toBe('trim-start')
+    expect(segmentZoneAt(0, 200)).toBe('trim-start')
+    expect(segmentZoneAt(EDGE_GRAB_PIXELS, 200)).toBe('trim-start')
   })
 
   it('grabs the tail within the edge margin', () => {
-    expect(clipZoneAt(200, 200)).toBe('trim-end')
-    expect(clipZoneAt(200 - EDGE_GRAB_PIXELS, 200)).toBe('trim-end')
+    expect(segmentZoneAt(200, 200)).toBe('trim-end')
+    expect(segmentZoneAt(200 - EDGE_GRAB_PIXELS, 200)).toBe('trim-end')
   })
 
-  it('moves the clip anywhere in between', () => {
-    expect(clipZoneAt(EDGE_GRAB_PIXELS + 1, 200)).toBe('move')
-    expect(clipZoneAt(100, 200)).toBe('move')
-    expect(clipZoneAt(200 - EDGE_GRAB_PIXELS - 1, 200)).toBe('move')
+  it('moves the segment anywhere in between', () => {
+    expect(segmentZoneAt(EDGE_GRAB_PIXELS + 1, 200)).toBe('move')
+    expect(segmentZoneAt(100, 200)).toBe('move')
+    expect(segmentZoneAt(200 - EDGE_GRAB_PIXELS - 1, 200)).toBe('move')
   })
 
-  it('is all edges on a clip too narrow to have a middle', () => {
-    // Otherwise a very short clip could never be trimmed back open.
-    expect(clipZoneAt(1, 8)).toBe('trim-start')
-    expect(clipZoneAt(7, 8)).toBe('trim-end')
+  it('is all edges on a segment too narrow to have a middle', () => {
+    // Otherwise a very short segment could never be trimmed back open.
+    expect(segmentZoneAt(1, 8)).toBe('trim-start')
+    expect(segmentZoneAt(7, 8)).toBe('trim-end')
   })
 })
 
 describe('legalStartRange', () => {
-  it('runs from zero to forever for a lone clip', () => {
+  it('runs from zero to forever for a lone segment', () => {
     const range = legalStartRange(oneClip(), 'clip-1')
 
     expect(range.minMicros).toBe(0)
@@ -100,7 +159,6 @@ describe('legalStartRange', () => {
     let project = twoClips()
     project = addClip(project, {
       id: 'middle',
-      sourceId: source.id,
       sourceInMicros: 0,
       sourceOutMicros: SECOND,
       timelineStartMicros: 3 * SECOND,
@@ -113,53 +171,63 @@ describe('legalStartRange', () => {
     expect(range.minMicros).toBe(2 * SECOND)
     expect(range.maxMicros).toBe(4 * SECOND)
   })
+
+  it('has no neighbours to stop at on a row that allows overlap', () => {
+    let project = withCaption(emptyProject(), 'a')
+    project = withCaption(project, 'b')
+
+    const range = legalStartRange(project, 'b')
+
+    expect(range.minMicros).toBe(0)
+    expect(range.maxMicros).toBe(Number.MAX_SAFE_INTEGER)
+  })
 })
 
-describe('clampClipStart', () => {
+describe('clampSegmentStart', () => {
   it('stops at a neighbour rather than overlapping it', () => {
-    expect(clampClipStart(twoClips(), 'right', 0)).toBe(2 * SECOND)
+    expect(clampSegmentStart(twoClips(), 'right', 0)).toBe(2 * SECOND)
   })
 
   it('never goes before the start of the timeline', () => {
-    expect(clampClipStart(oneClip(), 'clip-1', -5 * SECOND)).toBe(0)
+    expect(clampSegmentStart(oneClip(), 'clip-1', -5 * SECOND)).toBe(0)
   })
 
   it('leaves a legal position alone', () => {
-    expect(clampClipStart(twoClips(), 'right', 3 * SECOND)).toBe(3 * SECOND)
+    expect(clampSegmentStart(twoClips(), 'right', 3 * SECOND)).toBe(3 * SECOND)
   })
 })
 
 describe('dragToOperation', () => {
   it('turns a sideways drag into a move', () => {
     const operation = dragToOperation(oneClip(), {
-      clipId: 'clip-1',
+      segmentId: 'clip-1',
       mode: 'move',
       deltaMicros: 2 * SECOND,
     })
 
     expect(operation).toEqual({
       kind: 'move',
-      input: { clipId: 'clip-1', timelineStartMicros: 3 * SECOND },
+      input: { segmentId: 'clip-1', timelineStartMicros: 3 * SECOND },
     })
   })
 
   it('clamps a move into a neighbour', () => {
     const operation = dragToOperation(twoClips(), {
-      clipId: 'right',
+      segmentId: 'right',
       mode: 'move',
       deltaMicros: -5 * SECOND,
     })
 
     expect(operation).toEqual({
       kind: 'move',
-      input: { clipId: 'right', timelineStartMicros: 2 * SECOND },
+      input: { segmentId: 'right', timelineStartMicros: 2 * SECOND },
     })
   })
 
-  it('is nothing at all when the clip would not move', () => {
+  it('is nothing at all when the segment would not move', () => {
     expect(
       dragToOperation(oneClip(), {
-        clipId: 'clip-1',
+        segmentId: 'clip-1',
         mode: 'move',
         deltaMicros: 0,
       }),
@@ -168,41 +236,61 @@ describe('dragToOperation', () => {
     // Already hard against a neighbour: dragging further is not an edit.
     expect(
       dragToOperation(twoClips(), {
-        clipId: 'left',
+        segmentId: 'left',
         mode: 'move',
         deltaMicros: -SECOND,
       }),
     ).toBeNull()
   })
 
+  it('is still a move when only the row changes', () => {
+    const project = addTrack(oneClip(), { id: 'video-2', kind: 'video' })
+
+    expect(
+      dragToOperation(project, {
+        segmentId: 'clip-1',
+        mode: 'move',
+        deltaMicros: 0,
+        trackId: 'video-2',
+      }),
+    ).toEqual({
+      kind: 'move',
+      input: {
+        segmentId: 'clip-1',
+        timelineStartMicros: 1 * SECOND,
+        trackId: 'video-2',
+      },
+    })
+  })
+
   it('turns an edge drag into the matching trim', () => {
     expect(
       dragToOperation(oneClip(), {
-        clipId: 'clip-1',
+        segmentId: 'clip-1',
         mode: 'trim-start',
         deltaMicros: 500_000,
       }),
     ).toEqual({
       kind: 'trim-start',
-      input: { clipId: 'clip-1', timelineMicros: 1_500_000 },
+      input: { segmentId: 'clip-1', timelineMicros: 1_500_000 },
     })
 
     expect(
       dragToOperation(oneClip(), {
-        clipId: 'clip-1',
+        segmentId: 'clip-1',
         mode: 'trim-end',
         deltaMicros: -500_000,
       }),
     ).toEqual({
       kind: 'trim-end',
-      input: { clipId: 'clip-1', timelineMicros: 3_500_000 },
+      input: { segmentId: 'clip-1', timelineMicros: 3_500_000 },
     })
   })
 
-  it('is nothing for a clip that is not there', () => {
+  it('is nothing for a segment that is not there', () => {
     expect(
       dragToOperation(oneClip(), {
-        clipId: 'ghost',
+        segmentId: 'ghost',
         mode: 'move',
         deltaMicros: SECOND,
       }),
@@ -211,11 +299,11 @@ describe('dragToOperation', () => {
 })
 
 describe('applyDrag', () => {
-  it('moves a clip without touching its source range', () => {
-    const before = clipById(oneClip(), 'clip-1')
+  it('moves a segment without touching its source range', () => {
+    const before = video(clipById(oneClip(), 'clip-1'))
     const after = clipById(
       applyDrag(oneClip(), {
-        clipId: 'clip-1',
+        segmentId: 'clip-1',
         mode: 'move',
         deltaMicros: 2 * SECOND,
       }),
@@ -223,14 +311,14 @@ describe('applyDrag', () => {
     )
 
     expect(after.timelineStartMicros).toBe(3 * SECOND)
-    expect(after.sourceInMicros).toBe(before.sourceInMicros)
-    expect(after.sourceOutMicros).toBe(before.sourceOutMicros)
+    expect(video(after).sourceInMicros).toBe(before.sourceInMicros)
+    expect(video(after).sourceOutMicros).toBe(before.sourceOutMicros)
   })
 
   it('head trim moves the source in-point with the head', () => {
     const after = clipById(
       applyDrag(oneClip(), {
-        clipId: 'clip-1',
+        segmentId: 'clip-1',
         mode: 'trim-start',
         deltaMicros: SECOND,
       }),
@@ -238,14 +326,14 @@ describe('applyDrag', () => {
     )
 
     expect(after.timelineStartMicros).toBe(2 * SECOND)
-    expect(after.sourceInMicros).toBe(3 * SECOND)
-    expect(after.sourceOutMicros).toBe(5 * SECOND)
+    expect(video(after).sourceInMicros).toBe(3 * SECOND)
+    expect(video(after).sourceOutMicros).toBe(5 * SECOND)
   })
 
   it('tail trim moves the out-point only', () => {
     const after = clipById(
       applyDrag(oneClip(), {
-        clipId: 'clip-1',
+        segmentId: 'clip-1',
         mode: 'trim-end',
         deltaMicros: -SECOND,
       }),
@@ -253,8 +341,45 @@ describe('applyDrag', () => {
     )
 
     expect(after.timelineStartMicros).toBe(1 * SECOND)
-    expect(after.sourceInMicros).toBe(2 * SECOND)
-    expect(after.sourceOutMicros).toBe(4 * SECOND)
+    expect(video(after).sourceInMicros).toBe(2 * SECOND)
+    expect(video(after).sourceOutMicros).toBe(4 * SECOND)
+  })
+
+  it('drops a segment onto another row', () => {
+    const project = addTrack(oneClip(), { id: 'video-2', kind: 'video' })
+    const after = applyDrag(project, {
+      segmentId: 'clip-1',
+      mode: 'move',
+      deltaMicros: SECOND,
+      trackId: 'video-2',
+    })
+
+    expect(segmentsOn(after, MAIN_VIDEO_TRACK_ID)).toHaveLength(0)
+    expect(segmentsOn(after, 'video-2').map((s) => s.id)).toEqual(['clip-1'])
+    expect(clipById(after, 'clip-1').timelineStartMicros).toBe(2 * SECOND)
+  })
+
+  it('snaps back rather than throwing when a row refuses the drop', () => {
+    // A video segment has no business on the text row.
+    const project = withCaption(oneClip())
+    const after = applyDrag(project, {
+      segmentId: 'clip-1',
+      mode: 'move',
+      deltaMicros: 0,
+      trackId: MAIN_TEXT_TRACK_ID,
+    })
+
+    expect(after).toEqual(project)
+  })
+
+  it('drags a caption like anything else', () => {
+    const after = applyDrag(withCaption(emptyProject()), {
+      segmentId: 'text-1',
+      mode: 'move',
+      deltaMicros: 2 * SECOND,
+    })
+
+    expect(clipById(after, 'text-1').timelineStartMicros).toBe(3 * SECOND)
   })
 
   it('returns the project untouched when the gesture is a no-op', () => {
@@ -262,7 +387,7 @@ describe('applyDrag', () => {
 
     expect(
       applyDrag(project, {
-        clipId: 'clip-1',
+        segmentId: 'clip-1',
         mode: 'move',
         deltaMicros: 0,
       }),
@@ -274,16 +399,16 @@ describe('applyDrag', () => {
 
     for (const deltaMicros of [-99 * SECOND, 99 * SECOND]) {
       for (const mode of ['move', 'trim-start', 'trim-end'] as const) {
-        for (const clipId of ['left', 'right']) {
-          const after = applyDrag(project, { clipId, mode, deltaMicros })
+        for (const segmentId of ['left', 'right']) {
+          const after = applyDrag(project, { segmentId, mode, deltaMicros })
 
           // Whatever happened, the result is still a valid timeline.
-          const clips = after.videoTrack.clips
-          for (let i = 0; i < clips.length; i++) {
-            expect(clipDuration(clips[i]!)).toBeGreaterThan(0)
+          const segments = segmentsOn(after, MAIN_VIDEO_TRACK_ID)
+          for (let i = 0; i < segments.length; i++) {
+            expect(segmentDuration(segments[i]!)).toBeGreaterThan(0)
             if (i > 0) {
-              expect(clips[i]!.timelineStartMicros).toBeGreaterThanOrEqual(
-                clipEndMicros(clips[i - 1]!),
+              expect(segments[i]!.timelineStartMicros).toBeGreaterThanOrEqual(
+                segmentEndMicros(segments[i - 1]!),
               )
             }
           }
@@ -297,7 +422,7 @@ describe('applyDrag', () => {
     const snapshot = structuredClone(project)
 
     applyDrag(project, {
-      clipId: 'clip-1',
+      segmentId: 'clip-1',
       mode: 'move',
       deltaMicros: 3 * SECOND,
     })
@@ -312,14 +437,14 @@ describe('dragPreviewMicros', () => {
 
     expect(
       dragPreviewMicros(project, {
-        clipId: 'clip-1',
+        segmentId: 'clip-1',
         mode: 'move',
         deltaMicros: 0,
       }),
     ).toBe(1 * SECOND)
     expect(
       dragPreviewMicros(project, {
-        clipId: 'clip-1',
+        segmentId: 'clip-1',
         mode: 'trim-start',
         deltaMicros: 0,
       }),
@@ -330,17 +455,17 @@ describe('dragPreviewMicros', () => {
     // The tail is exclusive, so the last visible frame is one microsecond in.
     expect(
       dragPreviewMicros(oneClip(), {
-        clipId: 'clip-1',
+        segmentId: 'clip-1',
         mode: 'trim-end',
         deltaMicros: 0,
       }),
     ).toBe(4 * SECOND - 1)
   })
 
-  it('is nothing for a clip that is not there', () => {
+  it('is nothing for a segment that is not there', () => {
     expect(
       dragPreviewMicros(oneClip(), {
-        clipId: 'ghost',
+        segmentId: 'ghost',
         mode: 'move',
         deltaMicros: 0,
       }),

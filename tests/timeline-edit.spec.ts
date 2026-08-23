@@ -9,7 +9,23 @@ const SOURCE_DURATION = (FIXTURE.frames / FIXTURE.fps) * SECOND
 /** The project state itself, not what it happens to look like on screen. */
 function clips(page: Page) {
   return page.evaluate(
-    () => window.__timelineStore.getState().project.videoTrack.clips,
+    () => {
+      const project = window.__timelineStore.getState().project
+      return project.tracks
+        .filter((track) => track.kind === 'video')
+        .flatMap((track) => track.segments)
+        .flatMap((segment) =>
+          segment.content.kind === 'video'
+            ? [
+                {
+                  id: segment.id,
+                  timelineStartMicros: segment.timelineStartMicros,
+                  ...segment.content,
+                },
+              ]
+            : [],
+        )
+    },
   )
 }
 
@@ -42,7 +58,7 @@ test.beforeEach(async ({ page }) => {
     throw error
   })
   await page.goto('/')
-  await page.setInputFiles('input[type=file]', FIXTURE.path)
+  await page.setInputFiles('[data-testid=media-input]', FIXTURE.path)
   await expect(page.getByTestId('clip')).toBeVisible()
 
   // One clip covering the whole source, at the start of the timeline.

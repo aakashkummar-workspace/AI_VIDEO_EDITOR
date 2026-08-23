@@ -1,6 +1,6 @@
 # Video Editor - architecture rules
 
-- ONE render function. `renderFrame(state, timeMs)` is used by
+- ONE render function. `renderFrame(state, timeMs, layers)` is used by
   BOTH the preview and the export. Never write a second one.
 - All video decoding happens in a Web Worker. Main thread = UI only.
 - Every VideoSample and every VideoFrame must be closed exactly once,
@@ -9,7 +9,10 @@
   a raw VideoFrame. Closing the wrapper closes the frame it owns.
   `sample.toVideoFrame()` hands you a separate VideoFrame that you
   must close yourself, in addition to the sample.
-  Leaking either will crash the browser tab.
+  A `frame.clone()` is a THIRD handle with its own lifetime and its
+  own close; stacked rows rely on cloning, and `frameTracker` counts a
+  clone as a creation so the leak invariant still balances.
+  Leaking any of them will crash the browser tab.
 - Timeline state is plain JSON. No class instances, no GPU objects.
 - All time values are integers in MICROSECONDS. Never seconds,
   never floats.
@@ -62,6 +65,51 @@
   joining contiguous packets into runs first takes 42ms. Measure a
   real export with `npm run export:measure <path>` after touching the
   mix.
+
+# The timeline model
+
+- A project is an ordered stack of TRACKS, bottom of the stack first.
+  A track holds SEGMENTS. A segment carries either video (a source and
+  an in/out range) or text (its own words and its own stored duration).
+  There is ONE move and ONE trim, not one per kind of thing: what
+  differs between a clip and a caption is what it draws and whether its
+  row allows overlap, and both are properties of the TRACK. Never add a
+  parallel set of operations for a new kind of segment.
+- A video segment's duration is DERIVED from its source range. Only
+  text stores a duration, because it has no source to derive one from.
+  Never store a duration next to a range that already implies it.
+- Rows composite bottom upwards. `visibleVideoSegmentsAt` decides which
+  ones have to be drawn and stops at the first one that covers the
+  composition opaquely; a segment that is scaled, moved or faded stops
+  hiding what is under it, and letterbox bars are holes, not coverage.
+- THE TRAP, and it has already been paid for once: the worker and
+  `renderFrame` must never decide separately what is showing. The
+  decoder walks each row on its own and merges; renderFrame picks what
+  to paint. Anything that resolves "which segment is visible" twice
+  drifts, and it drifts silently in the export only. The golden-frame
+  test is what caught it.
+- Keyframe offsets are measured from the SEGMENT HEAD, never from the
+  timeline, so an animation survives a move and a trim. Values are
+  resolved at render time by `transformAt` / `effectAmountAt` and never
+  stored resolved.
+- An effect at its kind's neutral amount, and a segment with an
+  identity transform, must render byte for byte as if neither existed.
+  That is what keeps the golden-frame comparison meaningful.
+- The COMPOSITION is what the project is authored at; the EXPORT SIZE is
+  what the file is written at, and they are allowed to differ. The
+  render function only ever draws in composition coordinates - the
+  export scales its context ONCE before the loop, so a different
+  resolution can only make the same picture larger or smaller. Never
+  teach renderFrame about the output size.
+- The decode buffer is bounded by FRAMES, not by items. One item holds
+  one frame per drawn row, so counting items would let memory grow with
+  the number of rows while the cap looked unchanged. There is an item
+  bound too, because a run of gaps carries no frames at all.
+- A draft file (`draft.ts`) is data off someone's disk: parse it field
+  by field into a fresh object, never cast it. It carries no media, so
+  reopening one leaves its sources offline until files are handed back.
+  Opening a draft clears the undo history - undoing across it would
+  walk into a timeline the user has closed.
 
 # Stack
 Vite + React + TypeScript, pixi.js, mediabunny, zustand + immer

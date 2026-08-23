@@ -2,18 +2,23 @@ import { applyPatches, enablePatches, produceWithPatches, type Patch } from 'imm
 import { create } from 'zustand'
 import {
   mutators,
-  type AddClipInput,
-  type MoveClipInput,
-  type MoveOverlayInput,
-  type OverlayStyleInput,
-  type OverlayTrimInput,
-  type SplitClipInput,
+  type AddEffectInput,
+  type AddSegmentInput,
+  type AddTrackInput,
+  type EffectAmountInput,
+  type EffectKeyframeInput,
+  type KeyframeInput,
+  type MoveSegmentInput,
+  type SegmentTransformInput,
+  type SplitSegmentInput,
+  type TextStyleInput,
   type TrimInput,
 } from './operations'
 import {
   emptyProject,
+  type AnimatableProperty,
   type Composition,
-  type Overlay,
+  type ExportSettings,
   type Project,
   type Source,
 } from './types'
@@ -41,26 +46,61 @@ export type TimelineStore = {
   future: Change[]
 
   setComposition: (composition: Composition) => void
+  setExportSettings: (settings: Partial<ExportSettings>) => void
   addSource: (source: Source) => void
-  addClip: (input: AddClipInput) => void
-  removeClip: (clipId: string) => void
-  moveClip: (input: MoveClipInput) => void
-  trimClipStart: (input: TrimInput) => void
-  trimClipEnd: (input: TrimInput) => void
-  splitClipAt: (input: SplitClipInput) => void
 
-  addOverlay: (overlay: Overlay) => void
-  removeOverlay: (overlayId: string) => void
-  moveOverlay: (input: MoveOverlayInput) => void
-  trimOverlayStart: (input: OverlayTrimInput) => void
-  trimOverlayEnd: (input: OverlayTrimInput) => void
-  setOverlayStyle: (input: OverlayStyleInput) => void
+  addTrack: (input: AddTrackInput) => void
+  removeTrack: (trackId: string) => void
+  moveTrack: (input: { trackId: string; index: number }) => void
+
+  addSegment: (input: AddSegmentInput) => void
+  removeSegment: (segmentId: string) => void
+  moveSegment: (input: MoveSegmentInput) => void
+  trimSegmentStart: (input: TrimInput) => void
+  trimSegmentEnd: (input: TrimInput) => void
+  splitSegmentAt: (input: SplitSegmentInput) => void
+  setTextStyle: (input: TextStyleInput) => void
+
+  setSegmentTransform: (input: SegmentTransformInput) => void
+  addKeyframe: (input: KeyframeInput) => void
+  removeKeyframe: (input: {
+    segmentId: string
+    property: AnimatableProperty
+    offsetMicros: number
+  }) => void
+  clearKeyframes: (input: {
+    segmentId: string
+    property?: AnimatableProperty
+  }) => void
+
+  addEffect: (input: AddEffectInput) => void
+  removeEffect: (input: { segmentId: string; effectId: string }) => void
+  setEffectAmount: (input: EffectAmountInput) => void
+  moveEffect: (input: {
+    segmentId: string
+    effectId: string
+    index: number
+  }) => void
+  addEffectKeyframe: (input: EffectKeyframeInput) => void
+  removeEffectKeyframe: (input: {
+    segmentId: string
+    effectId: string
+    offsetMicros: number
+  }) => void
 
   /**
    * Ends the run of edits currently being merged, so the next one starts a
    * fresh undo step. Called when a field is left.
    */
   endCoalescing: () => void
+
+  /**
+   * Replaces everything with a project read from a draft.
+   *
+   * The history goes with it: undoing across a file being opened would walk
+   * back into a timeline the user has closed, which is not what undo means.
+   */
+  openProject: (project: Project) => void
 
   undo: () => void
   redo: () => void
@@ -129,7 +169,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
 
     /**
      * Registering a source is not an edit, so it is not undoable: undoing past
-     * it would leave clips pointing at a source the project no longer knows.
+     * it would leave segments pointing at a source the project no longer knows.
      */
     addSource: (source) =>
       set((state) => ({
@@ -140,31 +180,70 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
 
     setComposition: (composition) =>
       apply(mutators.setComposition, composition),
-    addClip: (input) => apply(mutators.addClip, input),
-    removeClip: (clipId) => apply(mutators.removeClip, clipId),
-    moveClip: (input) => apply(mutators.moveClip, input),
-    trimClipStart: (input) => apply(mutators.trimClipStart, input),
-    trimClipEnd: (input) => apply(mutators.trimClipEnd, input),
-    splitClipAt: (input) => apply(mutators.splitClipAt, input),
+    setExportSettings: (settings) =>
+      apply(mutators.setExportSettings, settings),
 
-    addOverlay: (overlay) => apply(mutators.addOverlay, overlay),
-    removeOverlay: (overlayId) => apply(mutators.removeOverlay, overlayId),
-    moveOverlay: (input) => apply(mutators.moveOverlay, input),
-    trimOverlayStart: (input) => apply(mutators.trimOverlayStart, input),
-    trimOverlayEnd: (input) => apply(mutators.trimOverlayEnd, input),
+    addTrack: (input) => apply(mutators.addTrack, input),
+    removeTrack: (trackId) => apply(mutators.removeTrack, trackId),
+    moveTrack: (input) => apply(mutators.moveTrack, input),
+
+    addSegment: (input) => apply(mutators.addSegment, input),
+    removeSegment: (segmentId) => apply(mutators.removeSegment, segmentId),
+    moveSegment: (input) => apply(mutators.moveSegment, input),
+    trimSegmentStart: (input) => apply(mutators.trimSegmentStart, input),
+    trimSegmentEnd: (input) => apply(mutators.trimSegmentEnd, input),
+    splitSegmentAt: (input) => apply(mutators.splitSegmentAt, input),
     /**
-     * The key names the overlay and the exact fields being changed, so typing
+     * The key names the segment and the exact fields being changed, so typing
      * merges with typing but a nudge of x afterwards starts its own step.
      */
-    setOverlayStyle: (input) =>
+    setTextStyle: (input) =>
       apply(
-        mutators.setOverlayStyle,
+        mutators.setTextStyle,
         input,
-        `style:${input.overlayId}:${Object.keys(input)
-          .filter((field) => field !== 'overlayId')
+        `style:${input.segmentId}:${Object.keys(input)
+          .filter((field) => field !== 'segmentId')
           .sort()
           .join(',')}`,
       ),
+
+    /**
+     * Dragging a scale slider is one edit, like typing a caption is: the key
+     * names the segment and the exact fields, so a slider merges with itself
+     * but not with the next control along.
+     */
+    setSegmentTransform: (input) =>
+      apply(
+        mutators.setSegmentTransform,
+        input,
+        `transform:${input.segmentId}:${Object.keys(input)
+          .filter((field) => field !== 'segmentId')
+          .sort()
+          .join(',')}`,
+      ),
+
+    addKeyframe: (input) => apply(mutators.addKeyframe, input),
+    removeKeyframe: (input) => apply(mutators.removeKeyframe, input),
+    clearKeyframes: (input) => apply(mutators.clearKeyframes, input),
+
+    addEffect: (input) => apply(mutators.addEffect, input),
+    removeEffect: (input) => apply(mutators.removeEffect, input),
+    moveEffect: (input) => apply(mutators.moveEffect, input),
+    /** Dragging one effect slider is one undo step, like every other slider. */
+    setEffectAmount: (input) =>
+      apply(
+        mutators.setEffectAmount,
+        input,
+        `effect:${input.segmentId}:${input.effectId}`,
+      ),
+    addEffectKeyframe: (input) => apply(mutators.addEffectKeyframe, input),
+    removeEffectKeyframe: (input) =>
+      apply(mutators.removeEffectKeyframe, input),
+
+    openProject: (project) => {
+      coalescing = null
+      set({ project, past: [], future: [] })
+    },
 
     endCoalescing: () => {
       coalescing = null

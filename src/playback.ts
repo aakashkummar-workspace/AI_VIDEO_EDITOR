@@ -1,9 +1,13 @@
-import { clipAt, overlaysAt } from './timeline/operations'
+import { textSegmentsAt, visibleVideoSegmentsAt } from './timeline/operations'
 import {
   OVERLAY_FONT_FAMILY,
-  type Overlay,
+  filterFor,
+  transformAt,
   type Project,
   type Rotation,
+  type Segment,
+  type TextContent,
+  type Transform,
 } from './timeline/types'
 
 export const MICROS_PER_SECOND = 1_000_000
@@ -55,6 +59,20 @@ export function selectFrame(
   return { drawIndex, dropCount: drawIndex < 0 ? 0 : drawIndex }
 }
 
+/**
+ * The decoded picture for each video segment that has to be drawn, by segment
+ * id. A segment present with a null frame is one whose decode produced nothing
+ * yet; an absent one is not being drawn at all.
+ *
+ * Keyed by segment rather than by track because that is what the renderer is
+ * actually asking for - "the frame for this segment" - and it keeps a row that
+ * changes segment mid-buffer from being handed the wrong picture.
+ */
+export type DecodedLayers = ReadonlyMap<string, CanvasImageSource | null>
+
+/** No layers at all: a gap, or a still-empty buffer. */
+export const NO_LAYERS: DecodedLayers = new Map()
+
 /** Any 2D context: a preview canvas on the UI thread, or an OffscreenCanvas in a worker. */
 export type RenderContext =
   | CanvasRenderingContext2D
@@ -103,14 +121,19 @@ export function fitRect(
  * The composition is always cleared to black first, so a gap, a frame that
  * failed to decode, and the letterbox bars beside a source of a different
  * shape are all the same thing: black, never a stale frame from the last paint.
- * Text overlays are drawn here too, for the same reason: one path, or the
- * preview and the export can disagree.
+ * Text is drawn here too, for the same reason: one path, or the preview and
+ * the export can disagree.
+ *
+ * Rows are painted bottom of the stack upwards, video first and then text, so
+ * a row higher in the stack lands over one below it. Each is drawn through its
+ * own transform, resolved from the keyframes at this exact moment - so an
+ * animation is a property of the render, not something played back separately.
  */
 export function renderFrame(
   context: RenderContext,
   project: Project,
   timelineMicros: number,
-  frame: CanvasImageSource | null,
+  layers: DecodedLayers,
 ): void {
   const { width, height } = project.composition
 
@@ -119,35 +142,107 @@ export function renderFrame(
   context.fillRect(0, 0, width, height)
   context.restore()
 
-  const found = clipAt(project, timelineMicros)
-  const source = found ? project.sources[found.clip.sourceId] : undefined
+  for (const { segment } of visibleVideoSegmentsAt(project, timelineMicros)) {
+    const frame = layers.get(segment.id)
+    if (!frame) continue
 
-  if (found && frame && source) {
-    drawFrame(
+    const content = segment.content
+    if (content.kind !== 'video') continue
+
+    const source = project.sources[content.sourceId]
+    if (!source) continue
+
+    const rect = fitRect(source.width, source.height, width, height)
+    withTransform(
       context,
-      frame,
-      fitRect(source.width, source.height, width, height),
-      source.rotation,
+      transformAt(segment, timelineMicros),
+      { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+      () => {
+        context.filter = filterFor(
+          segment.effects,
+          timelineMicros - segment.timelineStartMicros,
+        )
+        drawFrame(context, frame, rect, source.rotation)
+      },
     )
   }
 
-  // Overlays sit on top of whatever the picture turned out to be - including
-  // black, so an overlay over a gap still shows. Same call in the preview and
+  // Text sits on top of whatever the picture turned out to be - including
+  // black, so a caption over a gap still shows. Same call in the preview and
   // in the export, because there is only the one render function.
-  for (const overlay of overlaysAt(project, timelineMicros)) {
-    drawOverlay(context, overlay)
+  for (const { segment, content: text } of textSegmentsAt(
+    project,
+    timelineMicros,
+  )) {
+    // Text scales about its own anchor rather than about a centre: it has no
+    // box of its own until it is measured, and holding the corner still is
+    // what makes a size change predictable to drag against.
+    withTransform(
+      context,
+      transformAt(segment, timelineMicros),
+      { x: text.x, y: text.y },
+      () => {
+        context.filter = filterFor(
+          segment.effects,
+          timelineMicros - segment.timelineStartMicros,
+        )
+        drawText(context, text)
+      },
+    )
   }
 }
 
-/** Draws one text overlay at its place in the composition. */
-export function drawOverlay(context: RenderContext, overlay: Overlay): void {
-  if (overlay.content.length === 0 || overlay.sizePx <= 0) return
+/**
+ * Runs `draw` with a segment transform applied around `origin`.
+ *
+ * An identity transform leaves the context exactly as it found it, so an
+ * untransformed segment renders byte for byte as it did before transforms
+ * existed. That is what keeps the golden-frame comparison honest.
+ */
+export function withTransform(
+  context: RenderContext,
+  transform: Transform,
+  origin: { x: number; y: number },
+  draw: () => void,
+): void {
+  if (transform.opacity <= 0) return
 
   context.save()
-  context.font = `${overlay.sizePx}px ${OVERLAY_FONT_FAMILY}`
-  context.fillStyle = overlay.color
+  try {
+    context.globalAlpha = Math.min(1, transform.opacity)
+    context.translate(transform.x, transform.y)
+
+    if (transform.scale !== 1) {
+      context.translate(origin.x, origin.y)
+      context.scale(transform.scale, transform.scale)
+      context.translate(-origin.x, -origin.y)
+    }
+
+    draw()
+  } finally {
+    context.restore()
+  }
+}
+
+/** Which segments the decoder has to produce a picture for at this moment. */
+export function layerSegmentsAt(
+  project: Project,
+  timelineMicros: number,
+): Segment[] {
+  return visibleVideoSegmentsAt(project, timelineMicros).map(
+    (entry) => entry.segment,
+  )
+}
+
+/** Draws one line of text at its place in the composition. */
+export function drawText(context: RenderContext, text: TextContent): void {
+  if (text.content.length === 0 || text.sizePx <= 0) return
+
+  context.save()
+  context.font = `${text.sizePx}px ${OVERLAY_FONT_FAMILY}`
+  context.fillStyle = text.color
   context.textBaseline = 'top'
-  context.fillText(overlay.content, overlay.x, overlay.y)
+  context.fillText(text.content, text.x, text.y)
   context.restore()
 }
 

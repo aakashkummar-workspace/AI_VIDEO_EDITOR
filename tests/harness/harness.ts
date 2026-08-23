@@ -24,6 +24,7 @@ import {
   registerSourceFile,
 } from '../../src/timeline/sourceRegistry'
 import { useTimelineStore } from '../../src/timeline/store'
+import { MAIN_VIDEO_TRACK_ID } from '../../src/timeline/types'
 
 const canvas = document.getElementById('canvas') as HTMLCanvasElement
 
@@ -238,7 +239,19 @@ async function loadProject(spec: ProjectSpec) {
   }
 
   spec.clips.forEach((clip, index) =>
-    store.addClip({ id: `clip-${index}`, ...clip }),
+    store.addSegment({
+      trackId: MAIN_VIDEO_TRACK_ID,
+      segment: {
+        id: `clip-${index}`,
+        timelineStartMicros: clip.timelineStartMicros,
+        content: {
+          kind: 'video',
+          sourceId: clip.sourceId,
+          sourceInMicros: clip.sourceInMicros,
+          sourceOutMicros: clip.sourceOutMicros,
+        },
+      },
+    }),
   )
 
   const project = useTimelineStore.getState().project
@@ -274,12 +287,18 @@ async function loadExported() {
     height: geometry.height,
     rotation: geometry.rotation,
   })
-  store.addClip({
-    id: 'clip-exported',
-    sourceId,
-    sourceInMicros: 0,
-    sourceOutMicros: geometry.durationMicros,
-    timelineStartMicros: 0,
+  store.addSegment({
+    trackId: MAIN_VIDEO_TRACK_ID,
+    segment: {
+      id: 'clip-exported',
+      timelineStartMicros: 0,
+      content: {
+        kind: 'video',
+        sourceId,
+        sourceInMicros: 0,
+        sourceOutMicros: geometry.durationMicros,
+      },
+    },
   })
 
   const project = useTimelineStore.getState().project

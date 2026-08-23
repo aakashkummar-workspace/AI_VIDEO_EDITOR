@@ -35,7 +35,7 @@ test.beforeEach(async ({ page }) => {
     throw error
   })
   await page.goto('/')
-  await page.setInputFiles('input[type=file]', FIXTURE.path)
+  await page.setInputFiles('[data-testid=media-input]', FIXTURE.path)
   await expect(page.getByTestId('clip')).toBeVisible()
 })
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { createPlayer } from './player'
 import { exportFileName, formatMicros } from './playback'
@@ -6,10 +6,8 @@ import {
   applyDrag,
   dragPreviewMicros,
   dragToOperation,
-  findOverlay,
-  type ClipDrag,
   type DragMode,
-  type DragTarget,
+  type SegmentDrag,
 } from './timeline/dragging'
 import {
   DEFAULT_PIXELS_PER_SECOND,
@@ -19,23 +17,130 @@ import {
   fitPixelsPerSecond,
   pixelsToMicros,
 } from './timeline/layout'
+import {
+  draftFileName,
+  isDraftError,
+  parseDraftText,
+  serializeDraft,
+} from './timeline/draft'
 import { timelineDuration } from './timeline/operations'
-import { registerSourceFile } from './timeline/sourceRegistry'
+import {
+  clearSourceFiles,
+  hasSourceFile,
+  registerSourceFile,
+} from './timeline/sourceRegistry'
 import { useTimelineStore } from './timeline/store'
-import type { Project } from './timeline/types'
+import {
+  EFFECT_KINDS,
+  EXPORT_HEIGHTS,
+  EXPORT_QUALITIES,
+  effectAmountAt,
+  exportDimensions,
+  exportSettingsOf,
+  findSegment,
+  videoContent,
+  hasKeyframeAt,
+  isPropertyAnimated,
+  segmentEndMicros,
+  textContent,
+  transformAt,
+  type AnimatableProperty,
+  type EffectKind,
+  type Project,
+  type Segment,
+  type TrackKind,
+} from './timeline/types'
 import Timeline from './ui/Timeline'
 
 /** A gesture in progress. Nothing here has reached the undo history yet. */
 type ActiveDrag = {
-  clipId: string
+  segmentId: string
   mode: DragMode
   startClientX: number
   moved: boolean
-  target: DragTarget
+  trackId: string
 }
 
-/** A new overlay lands mid-composition, visible, and lasting two seconds. */
+/** A new text segment lands mid-composition, visible, and lasting two seconds. */
 const NEW_OVERLAY_MICROS = 2_000_000
+
+/** How each transform field is presented and stepped in the panel. */
+const TRANSFORM_FIELDS: {
+  property: AnimatableProperty
+  label: string
+  step: number
+  min?: number
+  max?: number
+}[] = [
+  { property: 'scale', label: 'scale', step: 0.05, min: 0.01 },
+  { property: 'x', label: 'offset x', step: 1 },
+  { property: 'y', label: 'offset y', step: 1 },
+  { property: 'opacity', label: 'opacity', step: 0.05, min: 0, max: 1 },
+]
+
+const EFFECT_KIND_NAMES = Object.keys(EFFECT_KINDS) as EffectKind[]
+
+/** How each quality is labelled, since the names alone are a bit bare. */
+const QUALITY_LABELS: Record<string, string> = {
+  low: 'Low - smallest file',
+  medium: 'Medium',
+  high: 'High',
+  'very-high': 'Very high - largest file',
+}
+
+/**
+ * The furthest into a source any segment reaches.
+ *
+ * Used when relinking: a file that stops short of this is not the file the
+ * draft was made with, however similar its name, and accepting it would leave
+ * segments pointing past the end of their own media.
+ */
+function furthestIntoSource(project: Project, sourceId: string): number {
+  let furthest = 0
+
+  for (const track of project.tracks) {
+    for (const segment of track.segments) {
+      const content = videoContent(segment)
+      if (content?.sourceId !== sourceId) continue
+      furthest = Math.max(furthest, content.sourceOutMicros)
+    }
+  }
+
+  return furthest
+}
+
+/**
+ * Which row the pointer is over, if any.
+ *
+ * Hit-tested against the DOM rather than tracked in state: the rows are laid
+ * out by the browser, and asking it where the pointer is beats keeping a
+ * parallel model of the layout in sync with it.
+ */
+function trackIdAtPoint(clientX: number, clientY: number): string | undefined {
+  const element = document.elementFromPoint(clientX, clientY)
+  const row = element?.closest('[data-testid=track]')
+  return (row as HTMLElement | null)?.dataset.trackId
+}
+
+/** Where the playhead falls inside a segment, which is what a keyframe is on. */
+function offsetIn(segment: Segment, timelineMicros: number): number {
+  return Math.max(0, Math.round(timelineMicros - segment.timelineStartMicros))
+}
+
+/** The lowest row of a kind: where a new segment goes without being told. */
+function firstTrackId(project: Project, kind: TrackKind): string | undefined {
+  return project.tracks.find((track) => track.kind === kind)?.id
+}
+
+/** Exclusive end of the last segment on one row. */
+function trackEndMicros(project: Project, trackId: string): number {
+  const track = project.tracks.find((candidate) => candidate.id === trackId)
+  if (!track) return 0
+  return track.segments.reduce(
+    (end, segment) => Math.max(end, segmentEndMicros(segment)),
+    0,
+  )
+}
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -53,10 +158,16 @@ export default function App() {
   const [pixelsPerSecond, setPixelsPerSecond] = useState(
     DEFAULT_PIXELS_PER_SECOND,
   )
-  const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(
+  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
     null,
   )
   const [overlayText, setOverlayText] = useState('Text')
+  /**
+   * Bumped whenever a file is handed to the source registry. The registry is
+   * deliberately not store state, so nothing else would tell React that a
+   * source stopped being offline.
+   */
+  const [relinkTick, setRelinkTick] = useState(0)
 
   const dragRef = useRef<ActiveDrag | null>(null)
   /** A scrub in progress: where it was grabbed, and from what position. */
@@ -176,14 +287,14 @@ export default function App() {
   )
 
   /** Starts a gesture. Preview updates happen on mousemove, below. */
-  const handleClipGrab = useCallback(
-    (clipId: string, mode: DragMode, clientX: number, target: DragTarget) => {
+  const handleSegmentGrab = useCallback(
+    (segmentId: string, mode: DragMode, clientX: number, trackId: string) => {
       dragRef.current = {
-        clipId,
+        segmentId,
         mode,
         startClientX: clientX,
         moved: false,
-        target,
+        trackId,
       }
     },
     [],
@@ -218,11 +329,18 @@ export default function App() {
       if (deltaMicros === 0 && !drag.moved) return
       drag.moved = true
 
-      const gesture: ClipDrag = {
-        clipId: drag.clipId,
+      // Which row the pointer is over, so a segment can be dragged between
+      // them. A trim stays on its own row whatever the pointer is over.
+      const overTrackId =
+        drag.mode === 'move'
+          ? trackIdAtPoint(event.clientX, event.clientY)
+          : undefined
+
+      const gesture: SegmentDrag = {
+        segmentId: drag.segmentId,
         mode: drag.mode,
         deltaMicros,
-        target: drag.target,
+        ...(overTrackId ? { trackId: overTrackId } : {}),
       }
       const preview = applyDrag(projectRef.current, gesture)
       previewTargetRef.current = dragPreviewMicros(preview, gesture)
@@ -247,14 +365,19 @@ export default function App() {
       swallowNextSeekRef.current = true
 
       // One operation, so one undo step, no matter how many mousemoves it took.
-      const gesture: ClipDrag = {
-        clipId: drag.clipId,
+      const overTrackId =
+        drag.mode === 'move'
+          ? trackIdAtPoint(event.clientX, event.clientY)
+          : undefined
+
+      const gesture: SegmentDrag = {
+        segmentId: drag.segmentId,
         mode: drag.mode,
         deltaMicros: pixelsToMicros(
           event.clientX - drag.startClientX,
           zoomRef.current,
         ),
-        target: drag.target,
+        ...(overTrackId ? { trackId: overTrackId } : {}),
       }
       const operation = dragToOperation(projectRef.current, gesture)
       if (!operation) return
@@ -263,22 +386,13 @@ export default function App() {
       try {
         switch (operation.kind) {
           case 'move':
-            store.moveClip(operation.input)
+            store.moveSegment(operation.input)
             break
           case 'trim-start':
-            store.trimClipStart(operation.input)
+            store.trimSegmentStart(operation.input)
             break
           case 'trim-end':
-            store.trimClipEnd(operation.input)
-            break
-          case 'move-overlay':
-            store.moveOverlay(operation.input)
-            break
-          case 'trim-overlay-start':
-            store.trimOverlayStart(operation.input)
-            break
-          case 'trim-overlay-end':
-            store.trimOverlayEnd(operation.input)
+            store.trimSegmentEnd(operation.input)
             break
         }
       } catch (err) {
@@ -319,9 +433,9 @@ export default function App() {
 
       if (event.key.toLowerCase() === 's') {
         event.preventDefault()
-        store.splitClipAt({
+        store.splitSegmentAt({
           timelineMicros: currentMicros,
-          newClipId: crypto.randomUUID(),
+          newSegmentId: crypto.randomUUID(),
         })
       }
     }
@@ -330,37 +444,235 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [currentMicros])
 
-  /** Drops a new overlay at the playhead, centred in the composition. */
+  /**
+   * Edits one transform field.
+   *
+   * On a property that is already animated this writes a keyframe at the
+   * playhead rather than the fixed value: once there is a curve, the fixed
+   * value is not what is being shown, so changing it would look like nothing
+   * happened. That is also what makes dragging a value at successive
+   * positions build an animation, which is how it works in every editor.
+   */
+  function setTransformValue(property: AnimatableProperty, value: number) {
+    const store = useTimelineStore.getState()
+    const segment = selectedSegmentId
+      ? findSegment(store.project, selectedSegmentId)?.segment
+      : undefined
+    if (!segment || !selectedSegmentId || !Number.isFinite(value)) return
+
+    if (isPropertyAnimated(segment, property)) {
+      store.addKeyframe({
+        segmentId: selectedSegmentId,
+        property,
+        offsetMicros: offsetIn(segment, currentMicros),
+        value,
+      })
+      return
+    }
+
+    store.setSegmentTransform({ segmentId: selectedSegmentId, [property]: value })
+  }
+
+  /** Puts a keyframe at the playhead, or takes the one there away. */
+  function toggleKeyframe(property: AnimatableProperty) {
+    const store = useTimelineStore.getState()
+    const segment = selectedSegmentId
+      ? findSegment(store.project, selectedSegmentId)?.segment
+      : undefined
+    if (!segment || !selectedSegmentId) return
+
+    const offsetMicros = offsetIn(segment, currentMicros)
+
+    if (hasKeyframeAt(segment, property, offsetMicros)) {
+      store.removeKeyframe({ segmentId: selectedSegmentId, property, offsetMicros })
+      return
+    }
+
+    // The first keyframe holds whatever is on screen right now, so pressing
+    // the button never changes the picture - it only starts pinning it.
+    store.addKeyframe({
+      segmentId: selectedSegmentId,
+      property,
+      offsetMicros,
+      value: transformAt(segment, currentMicros)[property],
+    })
+  }
+
+  /** Adds a row of a kind on top of the stack. */
+  function addTrack(kind: TrackKind) {
+    useTimelineStore.getState().addTrack({
+      id: `${kind}-${crypto.randomUUID().slice(0, 8)}`,
+      kind,
+    })
+  }
+
+  /**
+   * Removes a row and everything on it.
+   *
+   * The last row of a kind can go too: there is nothing special about it, and
+   * adding one back is a button away.
+   */
+  function removeTrack(trackId: string) {
+    const store = useTimelineStore.getState()
+    const doomed = store.project.tracks.find((track) => track.id === trackId)
+    if (doomed?.segments.some((segment) => segment.id === selectedSegmentId)) {
+      setSelectedSegmentId(null)
+    }
+    store.removeTrack(trackId)
+  }
+
+  /** Writes the timeline out as a draft file. */
+  function saveDraft() {
+    const project = useTimelineStore.getState().project
+    const url = URL.createObjectURL(
+      new Blob([serializeDraft(project)], { type: 'application/json' }),
+    )
+
+    const link = document.createElement('a')
+    link.href = url
+    link.download = draftFileName(project)
+    link.click()
+
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  }
+
+  /** Reads a draft file back in, leaving its media to be relinked. */
+  async function openDraft(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    setError(null)
+    setExportPercent(null)
+
+    try {
+      const project = parseDraftText(await file.text())
+
+      // A draft carries no media, so nothing that was open still applies.
+      clearSourceFiles()
+      useTimelineStore.getState().openProject(project)
+      setSelectedSegmentId(null)
+      setCurrentMicros(0)
+      setRelinkTick((tick) => tick + 1)
+      exportNameRef.current =
+        Object.values(project.sources)[0]?.name ?? 'timeline'
+    } catch (err) {
+      // A draft that cannot be read says why; anything else is a real fault.
+      setError(
+        isDraftError(err)
+          ? (err as Error).message
+          : err instanceof Error
+            ? err.message
+            : String(err),
+      )
+    }
+  }
+
+  /** Hands a file back to a source the draft could only name. */
+  async function relinkSource(
+    sourceId: string,
+    event: ChangeEvent<HTMLInputElement>,
+  ) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    setError(null)
+    const store = useTimelineStore.getState()
+    const known = store.project.sources[sourceId]
+    if (!known) return
+
+    try {
+      const geometry = await playerRef.current!.probeSource(sourceId, file)
+      const needed = furthestIntoSource(store.project, sourceId)
+
+      if (geometry.durationMicros < needed) {
+        setError(
+          `${file.name} is too short for this timeline: it needs` +
+            ` ${formatMicros(needed)} of ${known.name} but this file is` +
+            ` ${formatMicros(geometry.durationMicros)}.`,
+        )
+        return
+      }
+
+      registerSourceFile(sourceId, file)
+
+      // The real file decides the geometry from here: it is what gets decoded.
+      store.addSource({
+        id: sourceId,
+        name: file.name,
+        durationMicros: geometry.durationMicros,
+        width: geometry.width,
+        height: geometry.height,
+        rotation: geometry.rotation,
+      })
+      setRelinkTick((tick) => tick + 1)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  /** Puts a new effect on the selected segment, at its neutral amount. */
+  function addEffect(kind: EffectKind) {
+    if (!selectedSegmentId) return
+    useTimelineStore.getState().addEffect({
+      segmentId: selectedSegmentId,
+      id: crypto.randomUUID(),
+      kind,
+    })
+  }
+
+  /** Drops a new text segment at the playhead, centred in the composition. */
   function addOverlayAtPlayhead() {
     const store = useTimelineStore.getState()
     const { width, height } = store.project.composition
-    const id = crypto.randomUUID()
+    const trackId = firstTrackId(store.project, 'text')
+    if (!trackId) return
 
-    store.addOverlay({
-      id,
-      content: overlayText || 'Text',
-      x: Math.round(width * 0.1),
-      y: Math.round(height * 0.45),
-      sizePx: Math.max(12, Math.round(height * 0.12)),
-      color: '#ffffff',
-      timelineStartMicros: currentMicros,
-      durationMicros: NEW_OVERLAY_MICROS,
+    const id = crypto.randomUUID()
+    store.addSegment({
+      trackId,
+      segment: {
+        id,
+        timelineStartMicros: currentMicros,
+        content: {
+          kind: 'text',
+          content: overlayText || 'Text',
+          x: Math.round(width * 0.1),
+          y: Math.round(height * 0.45),
+          sizePx: Math.max(12, Math.round(height * 0.12)),
+          color: '#ffffff',
+          durationMicros: NEW_OVERLAY_MICROS,
+        },
+      },
     })
-    setSelectedOverlayId(id)
+    setSelectedSegmentId(id)
   }
 
-  /** Appends a clip covering the whole of a source, after everything else. */
+  /**
+   * Appends a segment covering the whole of a source, after everything already
+   * on the video row. Text on a row of its own does not push it along.
+   */
   function appendClip(sourceId: string) {
     const store = useTimelineStore.getState()
     const source = store.project.sources[sourceId]
     if (!source) return
 
-    store.addClip({
-      id: crypto.randomUUID(),
-      sourceId,
-      sourceInMicros: 0,
-      sourceOutMicros: source.durationMicros,
-      timelineStartMicros: timelineDuration(store.project),
+    const trackId = firstTrackId(store.project, 'video')
+    if (!trackId) return
+
+    store.addSegment({
+      trackId,
+      segment: {
+        id: crypto.randomUUID(),
+        timelineStartMicros: trackEndMicros(store.project, trackId),
+        content: {
+          kind: 'video',
+          sourceId,
+          sourceInMicros: 0,
+          sourceOutMicros: source.durationMicros,
+        },
+      },
     })
   }
 
@@ -405,9 +717,26 @@ export default function App() {
 
   const duration = timelineDuration(displayProject)
   const hasTimeline = duration > 0
+  const exportSettings = exportSettingsOf(displayProject)
+  const exportSize = exportDimensions(
+    displayProject.composition,
+    exportSettings,
+  )
   const sources = Object.values(displayProject.sources)
-  const selectedOverlay = selectedOverlayId
-    ? findOverlay(displayProject, selectedOverlayId)
+  // The source registry is deliberately not store state, so nothing would tell
+  // React that a source stopped being offline. relinkTick is that signal.
+  const offlineSources = useMemo(
+    () => sources.filter((source) => !hasSourceFile(source.id)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sources, relinkTick],
+  )
+  const selectedSegment = selectedSegmentId
+    ? findSegment(displayProject, selectedSegmentId)?.segment
+    : undefined
+  // Only text has anything to edit in the panel; a video segment is selected
+  // for dragging and cutting, not for styling.
+  const selectedText = selectedSegment
+    ? textContent(selectedSegment)
     : undefined
 
   /** Zooms so the whole timeline fits the visible strip. */
@@ -469,6 +798,21 @@ export default function App() {
         </button>{' '}
         <span data-testid="zoom">{Math.round(pixelsPerSecond)} px/s</span>
         </div>
+
+        <div className="draft-controls">
+          <button type="button" data-testid="save-draft" onClick={saveDraft}>
+            Save
+          </button>{' '}
+          <label className="open-draft">
+            Open
+            <input
+              type="file"
+              accept="application/json,.json"
+              data-testid="open-draft"
+              onChange={openDraft}
+            />
+          </label>
+        </div>
       </header>
 
       <aside className="sidebar">
@@ -477,6 +821,7 @@ export default function App() {
           <input
             type="file"
             accept="video/*"
+            data-testid="media-input"
             onChange={handleFileChange}
             className="file-input"
           />
@@ -503,6 +848,141 @@ export default function App() {
 
         </section>
 
+        {offlineSources.length > 0 && (
+          <section className="panel" data-testid="offline-panel">
+            <h2 className="panel-title">Media to relink</h2>
+            <p className="panel-note">
+              A draft remembers what it used, not the files themselves. Point
+              each one at its file to bring the timeline back.
+            </p>
+            <ul className="media-list" data-testid="offline-list">
+              {offlineSources.map((source) => (
+                <li key={source.id} data-testid="offline-item">
+                  <span data-testid="offline-name">{source.name}</span>{' '}
+                  <span className="media-meta">
+                    {formatMicros(source.durationMicros)}
+                  </span>
+                  <input
+                    type="file"
+                    accept="video/*"
+                    className="file-input"
+                    data-testid="relink-input"
+                    data-source-id={source.id}
+                    onChange={(event) => relinkSource(source.id, event)}
+                  />
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <section className="panel" data-testid="export-panel">
+          <h2 className="panel-title">Export</h2>
+          <div className="export-form">
+            <label>
+              <span>size</span>
+              <select
+                data-testid="export-height"
+                value={exportSettings.heightPx === null
+                  ? 'source'
+                  : String(exportSettings.heightPx)}
+                onChange={(event) =>
+                  useTimelineStore.getState().setExportSettings({
+                    heightPx:
+                      event.target.value === 'source'
+                        ? null
+                        : Number(event.target.value),
+                  })
+                }
+              >
+                <option value="source">
+                  Same as composition ({displayProject.composition.width}x
+                  {displayProject.composition.height})
+                </option>
+                {EXPORT_HEIGHTS.map((height) => (
+                  <option key={height} value={height}>
+                    {height}p
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label>
+              <span>quality</span>
+              <select
+                data-testid="export-quality"
+                value={exportSettings.quality}
+                onChange={(event) =>
+                  useTimelineStore.getState().setExportSettings({
+                    quality: event.target
+                      .value as (typeof EXPORT_QUALITIES)[number],
+                  })
+                }
+              >
+                {EXPORT_QUALITIES.map((quality) => (
+                  <option key={quality} value={quality}>
+                    {QUALITY_LABELS[quality] ?? quality}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <p className="panel-note" data-testid="export-summary">
+            Writes {exportSize.width}x{exportSize.height} MP4.
+            {exportSize.height > displayProject.composition.height
+              ? ' Larger than the composition, so it is scaled up.'
+              : ''}
+          </p>
+        </section>
+
+        <section className="panel">
+          <h2 className="panel-title">Rows</h2>
+          <div className="track-buttons">
+            <button
+              type="button"
+              data-testid="add-video-track"
+              onClick={() => addTrack('video')}
+            >
+              + video row
+            </button>{' '}
+            <button
+              type="button"
+              data-testid="add-text-track"
+              onClick={() => addTrack('text')}
+            >
+              + text row
+            </button>
+          </div>
+          <ul className="track-list" data-testid="track-list">
+            {[...displayProject.tracks].reverse().map((track) => (
+              <li
+                key={track.id}
+                className="track-row"
+                data-testid="track-item"
+                data-track-id={track.id}
+                data-track-kind={track.kind}
+              >
+                <span className="track-name">{track.kind}</span>
+                <span className="media-meta">
+                  {track.segments.length}
+                  {track.segments.length === 1 ? ' item' : ' items'}
+                </span>
+                <button
+                  type="button"
+                  className="effect-remove"
+                  title="Remove this row and everything on it"
+                  data-testid="remove-track"
+                  data-track-id={track.id}
+                  onClick={() => removeTrack(track.id)}
+                >
+                  &times;
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+
         <section className="panel">
           <h2 className="panel-title">Text</h2>
       <div className="overlay-form">
@@ -513,9 +993,9 @@ export default function App() {
           onBlur={() => useTimelineStore.getState().endCoalescing()}
           onChange={(event) => {
             setOverlayText(event.target.value)
-            if (selectedOverlay) {
-              useTimelineStore.getState().setOverlayStyle({
-                overlayId: selectedOverlay.id,
+            if (selectedText && selectedSegmentId) {
+              useTimelineStore.getState().setTextStyle({
+                segmentId: selectedSegmentId,
                 content: event.target.value,
               })
             }
@@ -529,7 +1009,7 @@ export default function App() {
         >
           Add text
         </button>
-        {selectedOverlay && (
+        {selectedText && selectedSegmentId && (
           <>
             {' '}
             <label>
@@ -538,10 +1018,10 @@ export default function App() {
                 type="number"
                 data-testid="overlay-x"
                 onBlur={() => useTimelineStore.getState().endCoalescing()}
-                value={selectedOverlay.x}
+                value={selectedText.x}
                 onChange={(event) =>
-                  useTimelineStore.getState().setOverlayStyle({
-                    overlayId: selectedOverlay.id,
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
                     x: Number(event.target.value),
                   })
                 }
@@ -553,10 +1033,10 @@ export default function App() {
                 type="number"
                 data-testid="overlay-y"
                 onBlur={() => useTimelineStore.getState().endCoalescing()}
-                value={selectedOverlay.y}
+                value={selectedText.y}
                 onChange={(event) =>
-                  useTimelineStore.getState().setOverlayStyle({
-                    overlayId: selectedOverlay.id,
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
                     y: Number(event.target.value),
                   })
                 }
@@ -568,10 +1048,10 @@ export default function App() {
                 type="number"
                 data-testid="overlay-size"
                 onBlur={() => useTimelineStore.getState().endCoalescing()}
-                value={selectedOverlay.sizePx}
+                value={selectedText.sizePx}
                 onChange={(event) =>
-                  useTimelineStore.getState().setOverlayStyle({
-                    overlayId: selectedOverlay.id,
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
                     sizePx: Math.max(1, Number(event.target.value)),
                   })
                 }
@@ -583,10 +1063,10 @@ export default function App() {
                 type="color"
                 data-testid="overlay-color"
                 onBlur={() => useTimelineStore.getState().endCoalescing()}
-                value={selectedOverlay.color}
+                value={selectedText.color}
                 onChange={(event) =>
-                  useTimelineStore.getState().setOverlayStyle({
-                    overlayId: selectedOverlay.id,
+                  useTimelineStore.getState().setTextStyle({
+                    segmentId: selectedSegmentId,
                     color: event.target.value,
                   })
                 }
@@ -596,10 +1076,8 @@ export default function App() {
               type="button"
               data-testid="remove-overlay"
               onClick={() => {
-                useTimelineStore
-                  .getState()
-                  .removeOverlay(selectedOverlay.id)
-                setSelectedOverlayId(null)
+                useTimelineStore.getState().removeSegment(selectedSegmentId)
+                setSelectedSegmentId(null)
               }}
             >
               Remove
@@ -609,6 +1087,202 @@ export default function App() {
       </div>
 
         </section>
+
+        {selectedSegment && selectedSegmentId && (
+          <section className="panel" data-testid="transform-panel">
+            <h2 className="panel-title">Transform</h2>
+            <div className="transform-form">
+              {TRANSFORM_FIELDS.map((field) => {
+                const offsetMicros = offsetIn(selectedSegment, currentMicros)
+                const animated = isPropertyAnimated(
+                  selectedSegment,
+                  field.property,
+                )
+                const keyed = hasKeyframeAt(
+                  selectedSegment,
+                  field.property,
+                  offsetMicros,
+                )
+                const value = transformAt(selectedSegment, currentMicros)[
+                  field.property
+                ]
+
+                return (
+                  <label key={field.property} className="transform-field">
+                    <span className="transform-label">{field.label}</span>
+                    <input
+                      type="number"
+                      step={field.step}
+                      min={field.min}
+                      max={field.max}
+                      data-testid={`transform-${field.property}`}
+                      value={Math.round(value * 1000) / 1000}
+                      onBlur={() =>
+                        useTimelineStore.getState().endCoalescing()
+                      }
+                      onChange={(event) =>
+                        setTransformValue(
+                          field.property,
+                          Number(event.target.value),
+                        )
+                      }
+                    />
+                    <button
+                      type="button"
+                      className={
+                        keyed
+                          ? 'keyframe-toggle is-keyed'
+                          : animated
+                            ? 'keyframe-toggle is-animated'
+                            : 'keyframe-toggle'
+                      }
+                      title={
+                        keyed
+                          ? 'Remove the keyframe at the playhead'
+                          : 'Add a keyframe at the playhead'
+                      }
+                      data-testid={`keyframe-${field.property}`}
+                      data-keyed={keyed ? 'true' : 'false'}
+                      onClick={() => toggleKeyframe(field.property)}
+                    >
+                      {keyed ? '\u25c6' : '\u25c7'}
+                    </button>
+                  </label>
+                )
+              })}
+            </div>
+          </section>
+        )}
+
+        {selectedSegment && selectedSegmentId && (
+          <section className="panel" data-testid="effects-panel">
+            <h2 className="panel-title">Effects</h2>
+
+            <select
+              className="effect-picker"
+              data-testid="add-effect"
+              value=""
+              onChange={(event) => {
+                if (!event.target.value) return
+                addEffect(event.target.value as EffectKind)
+                event.target.value = ''
+              }}
+            >
+              <option value="">Add an effect...</option>
+              {EFFECT_KIND_NAMES.map((kind) => (
+                <option key={kind} value={kind}>
+                  {kind}
+                </option>
+              ))}
+            </select>
+
+            <ul className="effect-list" data-testid="effect-list">
+              {(selectedSegment.effects ?? []).map((effect) => {
+                const spec = EFFECT_KINDS[effect.kind]
+                const offsetMicros = offsetIn(selectedSegment, currentMicros)
+
+                return (
+                  <li
+                    key={effect.id}
+                    className="effect-row"
+                    data-testid="effect-row"
+                    data-effect-kind={effect.kind}
+                  >
+                    <span className="effect-name">{effect.kind}</span>
+                    <input
+                      type="number"
+                      step={spec.step}
+                      min={spec.min}
+                      max={spec.max}
+                      data-testid={`effect-amount-${effect.kind}`}
+                      value={
+                        Math.round(effectAmountAt(effect, offsetMicros) * 1000) /
+                        1000
+                      }
+                      onBlur={() => useTimelineStore.getState().endCoalescing()}
+                      onChange={(event) => {
+                        const store = useTimelineStore.getState()
+                        const amount = Number(event.target.value)
+                        if (!Number.isFinite(amount)) return
+
+                        // Same rule as a transform: once it has a curve, an
+                        // edit writes a keyframe rather than the fixed value.
+                        if ((effect.keyframes?.length ?? 0) > 0) {
+                          store.addEffectKeyframe({
+                            segmentId: selectedSegmentId,
+                            effectId: effect.id,
+                            offsetMicros,
+                            value: amount,
+                          })
+                        } else {
+                          store.setEffectAmount({
+                            segmentId: selectedSegmentId,
+                            effectId: effect.id,
+                            amount,
+                          })
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className={
+                        (effect.keyframes ?? []).some(
+                          (k) => k.offsetMicros === offsetMicros,
+                        )
+                          ? 'keyframe-toggle is-keyed'
+                          : (effect.keyframes?.length ?? 0) > 0
+                            ? 'keyframe-toggle is-animated'
+                            : 'keyframe-toggle'
+                      }
+                      title="Keyframe this effect at the playhead"
+                      data-testid={`effect-keyframe-${effect.kind}`}
+                      onClick={() => {
+                        const store = useTimelineStore.getState()
+                        const keyed = (effect.keyframes ?? []).some(
+                          (k) => k.offsetMicros === offsetMicros,
+                        )
+                        if (keyed) {
+                          store.removeEffectKeyframe({
+                            segmentId: selectedSegmentId,
+                            effectId: effect.id,
+                            offsetMicros,
+                          })
+                        } else {
+                          store.addEffectKeyframe({
+                            segmentId: selectedSegmentId,
+                            effectId: effect.id,
+                            offsetMicros,
+                            value: effectAmountAt(effect, offsetMicros),
+                          })
+                        }
+                      }}
+                    >
+                      {(effect.keyframes ?? []).some(
+                        (k) => k.offsetMicros === offsetMicros,
+                      )
+                        ? '\u25c6'
+                        : '\u25c7'}
+                    </button>
+                    <button
+                      type="button"
+                      className="effect-remove"
+                      data-testid={`remove-effect-${effect.kind}`}
+                      title="Remove this effect"
+                      onClick={() =>
+                        useTimelineStore.getState().removeEffect({
+                          segmentId: selectedSegmentId,
+                          effectId: effect.id,
+                        })
+                      }
+                    >
+                      &times;
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          </section>
+        )}
 
         <section className="panel shortcuts">
           <h2 className="panel-title">Shortcuts</h2>
@@ -622,7 +1296,11 @@ export default function App() {
             <dt>Ctrl+scroll</dt>
             <dd>zoom the timeline</dd>
             <dt>drag</dt>
-            <dd>move a clip; drag an edge to trim</dd>
+            <dd>move a segment, or drop it on another row; drag an edge to trim</dd>
+            <dt>&#9671;</dt>
+            <dd>keyframe the value at the playhead</dd>
+            <dt>Save</dt>
+            <dd>write the timeline out as a draft</dd>
           </dl>
         </section>
       </aside>
@@ -657,13 +1335,11 @@ export default function App() {
             }
             seekFromUser(micros)
           }}
-          onClipGrab={handleClipGrab}
+          onSegmentGrab={handleSegmentGrab}
           pixelsPerSecond={pixelsPerSecond}
           onZoom={setPixelsPerSecond}
-          selectedId={selectedOverlayId}
-          onSelect={(id, target) =>
-            setSelectedOverlayId(target === 'overlay' ? id : null)
-          }
+          selectedId={selectedSegmentId}
+          onSelect={setSelectedSegmentId}
           onPlayheadGrab={handlePlayheadGrab}
         />
       </footer>

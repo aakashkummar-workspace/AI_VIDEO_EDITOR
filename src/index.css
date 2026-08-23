@@ -194,6 +194,157 @@ input[type='color'] {
   width: 58px;
 }
 
+.transform-form {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.transform-field {
+  display: grid;
+  grid-template-columns: 1fr 62px 22px;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.transform-field input[type='number'] {
+  width: 100%;
+}
+
+/*
+ * The diamond reads as three states at a glance: hollow for a property that
+ * is not animated, hollow-but-lit once it has a curve somewhere, and solid
+ * where the playhead is sitting exactly on one of its keyframes.
+ */
+.keyframe-toggle {
+  padding: 0;
+  width: 22px;
+  line-height: 20px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: transparent;
+}
+
+.keyframe-toggle.is-animated {
+  color: var(--accent, #6ea8fe);
+}
+
+.keyframe-toggle.is-keyed {
+  color: var(--accent, #6ea8fe);
+  font-weight: 700;
+}
+
+.effect-picker {
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.effect-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.effect-row {
+  display: grid;
+  grid-template-columns: 1fr 62px 22px 20px;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.effect-row input[type='number'] {
+  width: 100%;
+}
+
+.effect-remove {
+  padding: 0;
+  width: 20px;
+  line-height: 20px;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.draft-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The file input itself is hidden; the label is the button. */
+.open-draft {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid var(--line, #333);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.open-draft input[type='file'] {
+  display: none;
+}
+
+.panel-note {
+  margin: 0 0 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.track-buttons {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.track-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.track-row {
+  display: grid;
+  grid-template-columns: 1fr auto 20px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.track-name {
+  color: var(--text);
+}
+
+.export-form {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.export-form label {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.export-form select {
+  width: 100%;
+  min-width: 0;
+}
+
 .shortcuts dl {
   display: grid;
   grid-template-columns: auto 1fr;

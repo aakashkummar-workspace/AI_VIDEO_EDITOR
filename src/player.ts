@@ -30,8 +30,19 @@ export type PlayerOptions = {
   instrument?: boolean
 }
 
-/** A decoded item waiting to be shown: a frame, or null where a gap is. */
-type BufferedItem = { timelineMicros: number; frame: VideoFrame | null }
+/**
+ * A decoded item waiting to be shown: the picture for every video row that has
+ * to be drawn at that moment. An empty list is a gap, which paints black.
+ */
+type BufferedItem = {
+  timelineMicros: number
+  layers: { segmentId: string; frame: VideoFrame }[]
+}
+
+/** Frees every frame an item is carrying. */
+function closeItem(item: BufferedItem): void {
+  for (const layer of item.layers) layer.frame.close()
+}
 
 type Stats = {
   decoded: number
@@ -247,7 +258,7 @@ export function createPlayer(
   /** Closes and discards everything still buffered. */
   function flushBuffer() {
     for (const item of buffer) {
-      item.frame?.close()
+      closeItem(item)
       stats.dropped++
     }
     buffer.length = 0
@@ -264,9 +275,14 @@ export function createPlayer(
   /** The one render call on this thread. */
   function paint(item: BufferedItem) {
     try {
-      renderFrame(context2d(), project, item.timelineMicros, item.frame)
+      renderFrame(
+        context2d(),
+        project,
+        item.timelineMicros,
+        new Map(item.layers.map((layer) => [layer.segmentId, layer.frame])),
+      )
     } finally {
-      item.frame?.close()
+      closeItem(item)
     }
   }
 
@@ -297,7 +313,7 @@ export function createPlayer(
 
     if (drawIndex >= 0) {
       for (let i = 0; i < drawIndex; i++) {
-        buffer[i]!.frame?.close()
+        closeItem(buffer[i]!)
         stats.dropped++
       }
 
@@ -417,13 +433,13 @@ export function createPlayer(
 
     if (message.type === 'frame') {
       if (message.generation !== generation) {
-        message.frame?.close()
+        for (const layer of message.layers) layer.frame.close()
         return
       }
 
       const item: BufferedItem = {
         timelineMicros: message.timelineMicros,
-        frame: message.frame,
+        layers: message.layers,
       }
 
       if (message.mode === 'seek') {

@@ -15,15 +15,18 @@ const SECOND = 1_000_000
  */
 const OVERLAY = {
   id: 'overlay-1',
-  content: 'CAPTION',
-  x: 20,
-  y: 100,
-  sizePx: 40,
-  // Pure magenta appears nowhere in either fixture, so counting pixels near it
-  // answers "is the overlay on screen" without comparing whole frames.
-  color: '#ff00ff',
   timelineStartMicros: 1_500_000,
-  durationMicros: 2 * SECOND,
+  content: {
+    kind: 'text' as const,
+    content: 'CAPTION',
+    x: 20,
+    y: 100,
+    sizePx: 40,
+    // Pure magenta appears nowhere in either fixture, so counting pixels near
+    // it answers "is the overlay on screen" without comparing whole frames.
+    color: '#ff00ff',
+    durationMicros: 2 * SECOND,
+  },
 }
 
 const FRAME_MICROS = Math.round(SECOND / FIXTURE.fps)
@@ -65,7 +68,12 @@ async function loadWithOverlay(page: Page) {
     gappedTimelineSpec(),
   )
   await page.evaluate((overlay) => {
-    window.__timelineStore.getState().addOverlay(overlay)
+    const store = window.__timelineStore.getState()
+    const textTrack = store.project.tracks.find(
+      (track) => track.kind === 'text',
+    )
+    if (!textTrack) throw new Error('no text track')
+    store.addSegment({ trackId: textTrack.id, segment: overlay })
     window.harness.setProject(window.__timelineStore.getState().project)
   }, OVERLAY)
 }
@@ -106,7 +114,8 @@ test('the overlay appears exactly when it starts, not a frame earlier', async ({
 test('the overlay disappears exactly when it ends', async ({ page }) => {
   await loadWithOverlay(page)
 
-  const endMicros = OVERLAY.timelineStartMicros + OVERLAY.durationMicros
+  const endMicros =
+    OVERLAY.timelineStartMicros + OVERLAY.content.durationMicros
   const inside = await page.evaluate(
     (t) => window.harness.pixelsAt(t),
     endMicros - FRAME_MICROS,

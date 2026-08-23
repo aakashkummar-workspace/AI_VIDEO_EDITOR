@@ -100,7 +100,7 @@ test('trimming a clip trims its audio with it', async ({ page }) => {
   await page.evaluate(() => {
     window.__timelineStore
       .getState()
-      .trimClipStart({ clipId: 'clip-0', timelineMicros: 1_000_000 })
+      .trimSegmentStart({ segmentId: 'clip-0', timelineMicros: 1_000_000 })
   })
   await page.evaluate(() => {
     const project = window.__timelineStore.getState().project

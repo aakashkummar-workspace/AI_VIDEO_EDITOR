@@ -26,11 +26,23 @@ import type { Project, Rotation } from './timeline/types'
 export const BUFFER_AHEAD_MICROS = 400_000
 
 /**
- * Hard cap on buffered frames, so the time-based target above cannot blow up
+ * Hard cap on buffered FRAMES, so the time-based target above cannot blow up
  * memory on large frames. 24 frames covers 400ms at 60fps; at 4K that is
  * roughly 300MB of decoded frames worst case, which is the real limit here.
+ *
+ * Frames, not items: one render item carries one frame per video row that has
+ * to be drawn, so three stacked rows put three frames in flight per item. This
+ * bound is about memory, and memory is counted in frames.
  */
 export const BUFFER_MAX_FRAMES = 24
+
+/**
+ * Hard cap on buffered ITEMS, which the frame cap alone does not give.
+ *
+ * A stretch of gaps yields items carrying no frames at all; without this they
+ * would never fill the buffer and the walk would run away from the playhead.
+ */
+export const BUFFER_MAX_ITEMS = 24
 
 /** Decoded PCM for one stretch of the timeline. Planes are per channel. */
 export type AudioChunk = {
@@ -82,15 +94,16 @@ export type WorkerToMain =
       geometry: SourceGeometry
     }
   /**
-   * One render item. `frame` is null where the timeline has no clip, which the
-   * render function paints black.
+   * One render item: the decoded picture for every video row that has to be
+   * drawn at this moment, bottom of the stack first. An empty list is a moment
+   * with no picture at all, which the render function paints black.
    */
   | {
       type: 'frame'
       generation: number
       mode: 'seek' | 'play'
       timelineMicros: number
-      frame: VideoFrame | null
+      layers: { segmentId: string; frame: VideoFrame }[]
     }
   | {
       type: 'audioChunk'
