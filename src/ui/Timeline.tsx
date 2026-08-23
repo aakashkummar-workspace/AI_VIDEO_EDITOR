@@ -10,15 +10,26 @@ import {
   ZOOM_STEP,
 } from '../timeline/layout'
 import { segmentZoneAt, type DragMode } from '../timeline/dragging'
+import Waveform from './Waveform'
 import { timelineDuration } from '../timeline/operations'
 import {
   segmentDuration,
+  soundContent,
   textContent,
   transitionWindow,
   type Project,
   type Segment,
   type Track,
 } from '../timeline/types'
+
+/** A measured waveform, by the source it belongs to. */
+export type PeaksBySource = Record<
+  string,
+  { peaks: Float32Array; bucketsPerSecond: number }
+>
+
+/** How tall a waveform is drawn inside its block. */
+const WAVEFORM_HEIGHT = 22
 
 export type TimelineProps = {
   project: Project
@@ -39,6 +50,8 @@ export type TimelineProps = {
   pixelsPerSecond?: number
   /** Reports a zoom the timeline initiated, e.g. ctrl+wheel. */
   onZoom?: (pixelsPerSecond: number) => void | undefined
+  /** Waveforms for whichever sources have been measured so far. */
+  peaks?: PeaksBySource
 }
 
 const CURSOR_FOR: Record<DragMode, string> = {
@@ -85,6 +98,7 @@ export default function Timeline({
   selectedId = null,
   onSelect = () => {},
   onPlayheadGrab = () => {},
+  peaks = {},
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -207,6 +221,29 @@ export default function Timeline({
                     )
                   }}
                 >
+                  {(() => {
+                    // A waveform, once the source it plays has been measured.
+                    const sound = soundContent(segment)
+                    const measured = sound ? peaks[sound.sourceId] : undefined
+                    if (!sound || !measured || measured.peaks.length === 0) {
+                      return null
+                    }
+
+                    return (
+                      <Waveform
+                        peaks={measured.peaks}
+                        bucketsPerSecond={measured.bucketsPerSecond}
+                        sourceInMicros={sound.sourceInMicros}
+                        sourceOutMicros={sound.sourceOutMicros}
+                        width={microsToPixels(
+                          segmentDuration(segment),
+                          pixelsPerSecond,
+                        )}
+                        height={WAVEFORM_HEIGHT}
+                      />
+                    )
+                  })()}
+
                   {/* The stretch where this segment and the one before it
                       are both on screen. */}
                   {transitionWindow(segment) && (

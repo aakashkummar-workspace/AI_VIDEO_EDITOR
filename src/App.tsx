@@ -53,6 +53,7 @@ import {
   exportDimensions,
   exportSettingsOf,
   findSegment,
+  isAnimated,
   propertyAt,
   segmentDuration,
   segmentRate,
@@ -73,7 +74,7 @@ import {
   type Segment,
   type TrackKind,
 } from './timeline/types'
-import Timeline from './ui/Timeline'
+import Timeline, { type PeaksBySource } from './ui/Timeline'
 
 /** A gesture in progress. Nothing here has reached the undo history yet. */
 type ActiveDrag = {
@@ -222,6 +223,11 @@ export default function App() {
    * project it is about to restore.
    */
   const [restored, setRestored] = useState(false)
+  /**
+   * Waveforms, by source. Derived from the media rather than part of the
+   * project, so they live here and never go near the store.
+   */
+  const [peaks, setPeaks] = useState<PeaksBySource>({})
 
   const dragRef = useRef<ActiveDrag | null>(null)
   /** A scrub in progress: where it was grabbed, and from what position. */
@@ -389,6 +395,46 @@ export default function App() {
 
     return () => clearTimeout(timer)
   }, [project, restored])
+
+  /**
+   * Measures the waveform of any source that carries sound and has not been
+   * measured yet. Once per source, however many segments use it.
+   */
+  useEffect(() => {
+    const wanted = new Set<string>()
+    for (const track of project.tracks) {
+      if (track.kind !== 'video' && track.kind !== 'audio') continue
+      for (const segment of track.segments) {
+        const sound = soundContent(segment)
+        if (sound) wanted.add(sound.sourceId)
+      }
+    }
+
+    for (const sourceId of wanted) {
+      if (peaks[sourceId] || !hasSourceFile(sourceId)) continue
+
+      // Marked as measured before the answer arrives, so a re-render while it
+      // is in flight does not ask again.
+      setPeaks((current) =>
+        current[sourceId]
+          ? current
+          : {
+              ...current,
+              [sourceId]: {
+                peaks: new Float32Array(0),
+                bucketsPerSecond: 1,
+              },
+            },
+      )
+
+      void playerRef.current
+        ?.sourcePeaks(sourceId)
+        .then((measured) =>
+          setPeaks((current) => ({ ...current, [sourceId]: measured })),
+        )
+        .catch((err) => console.warn('[waveform] could not measure:', err))
+    }
+  }, [project, peaks, relinkTick])
 
   const seek = useCallback((timelineMicros: number) => {
     playerRef.current?.seek(timelineMicros)
@@ -1249,31 +1295,69 @@ export default function App() {
             </button>
           </div>
           <ul className="track-list" data-testid="track-list">
-            {[...displayProject.tracks].reverse().map((track) => (
-              <li
-                key={track.id}
-                className="track-row"
-                data-testid="track-item"
-                data-track-id={track.id}
-                data-track-kind={track.kind}
-              >
-                <span className="track-name">{track.kind}</span>
-                <span className="media-meta">
-                  {track.segments.length}
-                  {track.segments.length === 1 ? ' item' : ' items'}
-                </span>
-                <button
-                  type="button"
-                  className="effect-remove"
-                  title="Remove this row and everything on it"
-                  data-testid="remove-track"
+            {[...displayProject.tracks].reverse().map((track) => {
+              // The list runs top of the stack first, so "up" here is a HIGHER
+              // index in the project. Getting that backwards would move rows
+              // the opposite way from the arrow that was clicked.
+              const index = displayProject.tracks.indexOf(track)
+              const top = displayProject.tracks.length - 1
+
+              return (
+                <li
+                  key={track.id}
+                  className="track-row"
+                  data-testid="track-item"
                   data-track-id={track.id}
-                  onClick={() => removeTrack(track.id)}
+                  data-track-kind={track.kind}
                 >
-                  &times;
-                </button>
-              </li>
-            ))}
+                  <span className="track-name">{track.kind}</span>
+                  <span className="media-meta">
+                    {track.segments.length}
+                    {track.segments.length === 1 ? ' item' : ' items'}
+                  </span>
+                  <button
+                    type="button"
+                    className="effect-remove"
+                    title="Move this row up the stack"
+                    data-testid="track-up"
+                    data-track-id={track.id}
+                    disabled={index === top}
+                    onClick={() =>
+                      useTimelineStore
+                        .getState()
+                        .moveTrack({ trackId: track.id, index: index + 1 })
+                    }
+                  >
+                    &#9650;
+                  </button>
+                  <button
+                    type="button"
+                    className="effect-remove"
+                    title="Move this row down the stack"
+                    data-testid="track-down"
+                    data-track-id={track.id}
+                    disabled={index === 0}
+                    onClick={() =>
+                      useTimelineStore
+                        .getState()
+                        .moveTrack({ trackId: track.id, index: index - 1 })
+                    }
+                  >
+                    &#9660;
+                  </button>
+                  <button
+                    type="button"
+                    className="effect-remove"
+                    title="Remove this row and everything on it"
+                    data-testid="remove-track"
+                    data-track-id={track.id}
+                    onClick={() => removeTrack(track.id)}
+                  >
+                    &times;
+                  </button>
+                </li>
+              )
+            })}
           </ul>
         </section>
 
@@ -1534,6 +1618,20 @@ export default function App() {
             <div className="transform-form">
               {TRANSFORM_FIELDS.map(propertyField)}
             </div>
+            {isAnimated(selectedSegment) && (
+              <button
+                type="button"
+                className="clear-keyframes"
+                data-testid="clear-keyframes"
+                onClick={() =>
+                  useTimelineStore
+                    .getState()
+                    .clearKeyframes({ segmentId: selectedSegmentId })
+                }
+              >
+                Remove every keyframe
+              </button>
+            )}
           </section>
         )}
 
@@ -1799,9 +1897,10 @@ export default function App() {
             </select>
 
             <ul className="effect-list" data-testid="effect-list">
-              {(selectedSegment.effects ?? []).map((effect) => {
+              {(selectedSegment.effects ?? []).map((effect, index) => {
                 const spec = EFFECT_KINDS[effect.kind]
                 const offsetMicros = offsetIn(selectedSegment, currentMicros)
+                const chain = selectedSegment.effects ?? []
 
                 return (
                   <li
@@ -1884,6 +1983,38 @@ export default function App() {
                       )
                         ? '\u25c6'
                         : '\u25c7'}
+                    </button>
+                    <button
+                      type="button"
+                      className="effect-remove"
+                      data-testid={`effect-up-${effect.kind}`}
+                      title="Apply this effect earlier in the chain"
+                      disabled={index === 0}
+                      onClick={() =>
+                        useTimelineStore.getState().moveEffect({
+                          segmentId: selectedSegmentId,
+                          effectId: effect.id,
+                          index: index - 1,
+                        })
+                      }
+                    >
+                      &#9650;
+                    </button>
+                    <button
+                      type="button"
+                      className="effect-remove"
+                      data-testid={`effect-down-${effect.kind}`}
+                      title="Apply this effect later in the chain"
+                      disabled={index === chain.length - 1}
+                      onClick={() =>
+                        useTimelineStore.getState().moveEffect({
+                          segmentId: selectedSegmentId,
+                          effectId: effect.id,
+                          index: index + 1,
+                        })
+                      }
+                    >
+                      &#9660;
                     </button>
                     <button
                       type="button"
@@ -2015,6 +2146,7 @@ export default function App() {
           selectedId={selectedSegmentId}
           onSelect={setSelectedSegmentId}
           onPlayheadGrab={handlePlayheadGrab}
+          peaks={peaks}
         />
       </footer>
     </div>

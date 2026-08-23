@@ -171,6 +171,14 @@
 - A mask is cut on a SCRATCH LAYER, never in place: `destination-in` on
   the composition would take the rows underneath with it. The feather is
   a blur on the mask shape, not a gradient per side.
+- A waveform belongs to the SOURCE, not to the segment. Measure once
+  per file and re-slice it for each block; never measure per segment.
+  The request is not guarded by the generation counter, because a
+  waveform is a property of the file rather than of what is currently
+  on the timeline.
+- Peaks are derived from the media and are not plain JSON, so they live
+  in component state and never go near the store - the same split the
+  source registry already makes for the files themselves.
 - Only GENERIC font families are offered, and no font file is ever
   shipped or fetched. A named webfont would have to finish loading
   before the preview or the export could draw with it, and losing that

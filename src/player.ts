@@ -228,6 +228,10 @@ export function createPlayer(
   }
   let pendingFrameCounts: ((report: FrameCountReport) => void) | null = null
   const pendingProbes = new Map<string, (geometry: SourceGeometry) => void>()
+  const pendingPeaks = new Map<
+    string,
+    (result: { peaks: Float32Array; bucketsPerSecond: number }) => void
+  >()
 
   function send(message: MainToWorker, transfer: Transferable[] = []) {
     worker.postMessage(message, transfer)
@@ -477,6 +481,15 @@ export function createPlayer(
       return
     }
 
+    if (message.type === 'peaks') {
+      pendingPeaks.get(message.sourceId)?.({
+        peaks: message.peaks,
+        bucketsPerSecond: message.bucketsPerSecond,
+      })
+      pendingPeaks.delete(message.sourceId)
+      return
+    }
+
     if (message.type === 'sourceProbed') {
       pendingProbes.get(message.sourceId)?.(message.geometry)
       pendingProbes.delete(message.sourceId)
@@ -557,6 +570,22 @@ export function createPlayer(
       }
 
       send({ type: 'setProject', generation, project: next })
+    },
+
+    /**
+     * Measures the waveform of a source.
+     *
+     * Not tied to the generation: a waveform is a property of the file rather
+     * than of what is on the timeline, so an edit while it is being measured
+     * does not make the answer stale.
+     */
+    sourcePeaks(
+      sourceId: string,
+    ): Promise<{ peaks: Float32Array; bucketsPerSecond: number }> {
+      return new Promise((resolve) => {
+        pendingPeaks.set(sourceId, resolve)
+        send({ type: 'peaks', generation, sourceId })
+      })
     },
 
     /** Renders a single frame at a timeline position through the preview path. */

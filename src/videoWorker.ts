@@ -56,6 +56,7 @@ import {
 import {
   AUDIO_BUFFER_MAX_CHUNKS,
   BUFFER_AHEAD_MICROS,
+  WAVEFORM_BUCKETS_PER_SECOND,
   BUFFER_MAX_FRAMES,
   BUFFER_MAX_ITEMS,
   type AudioChunk,
@@ -714,6 +715,66 @@ function applyVolume(
   }
 }
 
+/**
+ * Measures the waveform of a whole source, once.
+ *
+ * The loudest sample in each bucket rather than an average: an average of a
+ * waveform tends to zero, because it is as often below the line as above it.
+ * Only the first channel is read - a second one would double the work to draw
+ * a shape a few pixels tall that nobody could tell apart.
+ */
+async function measurePeaks(sourceId: string): Promise<{
+  peaks: Float32Array<ArrayBuffer>
+  bucketsPerSecond: number
+}> {
+  const opened = await openSource(sourceId)
+  const track = opened.audioTrack
+  if (!track) {
+    return {
+      peaks: new Float32Array(0) as Float32Array<ArrayBuffer>,
+      bucketsPerSecond: WAVEFORM_BUCKETS_PER_SECOND,
+    }
+  }
+
+  const durationMicros = opened.geometry.durationMicros
+  const bucketCount = Math.max(
+    1,
+    Math.ceil((durationMicros / 1e6) * WAVEFORM_BUCKETS_PER_SECOND),
+  )
+  const peaks = new Float32Array(bucketCount) as Float32Array<ArrayBuffer>
+
+  const samples = new AudioSampleSink(track).samples(0, undefined)
+  try {
+    for await (const sample of samples) {
+      try {
+        const frames = sample.numberOfFrames
+        if (frames === 0) continue
+
+        const plane = new Float32Array(frames)
+        sample.copyTo(plane, { planeIndex: 0, format: 'f32-planar' })
+
+        const rate = sample.sampleRate
+        const startMicros = sample.timestamp * 1e6
+
+        for (let i = 0; i < frames; i++) {
+          const at = startMicros + (i / rate) * 1e6
+          const bucket = Math.floor((at / 1e6) * WAVEFORM_BUCKETS_PER_SECOND)
+          if (bucket < 0 || bucket >= bucketCount) continue
+
+          const value = Math.abs(plane[i]!)
+          if (value > peaks[bucket]!) peaks[bucket] = value
+        }
+      } finally {
+        sample.close()
+      }
+    }
+  } finally {
+    await samples.return()
+  }
+
+  return { peaks, bucketsPerSecond: WAVEFORM_BUCKETS_PER_SECOND }
+}
+
 function postAudioChunk(
   chunk: AudioChunk,
   mode: 'play' | 'export',
@@ -1141,6 +1202,37 @@ scope.addEventListener('message', (event) => {
         openSources: sources.size,
       })
       return
+
+    case 'peaks': {
+      const { sourceId, generation: asked } = message
+      // Deliberately not guarded by generation: a waveform is a property of
+      // the file, not of what is on the timeline, so it stays true across
+      // every edit that happens while it is being measured.
+      void measurePeaks(sourceId)
+        .then(({ peaks, bucketsPerSecond }) => {
+          scope.postMessage(
+            {
+              type: 'peaks',
+              generation: asked,
+              sourceId,
+              peaks,
+              bucketsPerSecond,
+            },
+            [peaks.buffer],
+          )
+        })
+        .catch((error) => {
+          console.warn('[worker] could not measure a waveform:', error)
+          scope.postMessage({
+            type: 'peaks',
+            generation: asked,
+            sourceId,
+            peaks: new Float32Array(0) as Float32Array<ArrayBuffer>,
+            bucketsPerSecond: WAVEFORM_BUCKETS_PER_SECOND,
+          })
+        })
+      return
+    }
   }
 })
 

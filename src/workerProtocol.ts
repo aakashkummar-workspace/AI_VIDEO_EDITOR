@@ -52,6 +52,15 @@ export type AudioChunk = {
   planes: Float32Array<ArrayBuffer>[]
 }
 
+/**
+ * How finely a waveform is measured, in buckets per second.
+ *
+ * Fifty is about one bucket per two pixels at the default zoom, which is as
+ * much detail as a timeline block can show. A three minute song is then nine
+ * thousand numbers, which is nothing to keep and nothing to draw.
+ */
+export const WAVEFORM_BUCKETS_PER_SECOND = 50
+
 /** How many undelivered audio chunks the worker keeps ahead of the playhead. */
 export const AUDIO_BUFFER_MAX_CHUNKS = 64
 
@@ -88,6 +97,8 @@ export type MainToWorker =
       } | null
     }
   | { type: 'frameCounts'; generation: number }
+  /** Asks for the waveform of a source, which is measured once and kept. */
+  | { type: 'peaks'; generation: number; sourceId: string }
 
 export type WorkerToMain =
   | {
@@ -124,5 +135,13 @@ export type WorkerToMain =
       counts: { created: number; closed: number }
       /** How many Inputs the worker currently holds open. */
       openSources: number
+    }
+  | {
+      type: 'peaks'
+      generation: number
+      sourceId: string
+      /** Loudest sample in each bucket, from 0 to 1. Empty when silent. */
+      peaks: Float32Array<ArrayBuffer>
+      bucketsPerSecond: number
     }
   | { type: 'error'; generation: number; message: string }
