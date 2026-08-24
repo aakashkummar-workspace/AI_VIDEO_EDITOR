@@ -13,6 +13,7 @@ import {
   type ChromaKeyInput,
   type MaskInput,
   type DuplicateSegmentInput,
+  type KeepSourceSpansInput,
   type SplitSegmentInput,
   type TextStyleInput,
   type TransitionInput,
@@ -45,6 +46,19 @@ type Change = {
 /** How many undo steps to keep. */
 const HISTORY_LIMIT = 100
 
+/**
+ * One edit in a run worked out somewhere else - by the assistant, today.
+ *
+ * It names a mutator rather than carrying its own behaviour, so a run can only
+ * ever do things the buttons and the keyboard can already do. A step that could
+ * carry arbitrary work would be a second way to edit a project, which is
+ * exactly what this codebase does not have.
+ */
+export type PlanStepInput = {
+  mutator: keyof typeof mutators
+  input: unknown
+}
+
 export type TimelineStore = {
   project: Project
   past: Change[]
@@ -53,6 +67,16 @@ export type TimelineStore = {
   setComposition: (composition: Composition) => void
   setExportSettings: (settings: Partial<ExportSettings>) => void
   addSource: (source: Source) => void
+
+  /**
+   * Forgets a source and every segment that played it, as one undo step.
+   *
+   * Undoable, where adding a source is not - and the asymmetry is the point.
+   * Undoing an ADDITION would strip a source out from under segments still
+   * using it; undoing a REMOVAL puts the source and its segments back
+   * together, which is a state the project was actually in.
+   */
+  removeSource: (sourceId: string) => void
 
   addTrack: (input: AddTrackInput) => void
   removeTrack: (trackId: string) => void
@@ -64,6 +88,26 @@ export type TimelineStore = {
   trimSegmentStart: (input: TrimInput) => void
   trimSegmentEnd: (input: TrimInput) => void
   duplicateSegment: (input: DuplicateSegmentInput) => void
+
+  /**
+   * Replaces a segment with the parts of it worth keeping, as one undo step.
+   *
+   * WHICH parts is decided elsewhere: it needs the waveform, and the waveform
+   * is measured from the media rather than stored in the project. See
+   * `silence.ts`.
+   */
+  keepSourceSpans: (input: KeepSourceSpansInput) => void
+
+  /**
+   * Runs a whole plan as ONE undo step.
+   *
+   * A run of edits somebody approved is one decision, so it has to be one
+   * keystroke to take back - undoing an assistant's work a step at a time would
+   * make rejecting it worse than never asking. Every step goes through the same
+   * mutator its button would, so this is a second ROUTE to those edits and
+   * never a second implementation of them.
+   */
+  applyPlan: (steps: PlanStepInput[]) => void
   splitSegmentAt: (input: SplitSegmentInput) => void
   setSegmentRate: (input: { segmentId: string; rate: number }) => void
   setSegmentBlendMode: (input: {
@@ -195,6 +239,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
         })[0],
       })),
 
+    removeSource: (sourceId) => apply(mutators.removeSource, sourceId),
+
     setComposition: (composition) =>
       apply(mutators.setComposition, composition),
     setExportSettings: (settings) =>
@@ -210,6 +256,23 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     trimSegmentStart: (input) => apply(mutators.trimSegmentStart, input),
     trimSegmentEnd: (input) => apply(mutators.trimSegmentEnd, input),
     duplicateSegment: (input) => apply(mutators.duplicateSegment, input),
+    keepSourceSpans: (input) => apply(mutators.keepSourceSpans, input),
+
+    /**
+     * If any step throws, produce discards the draft and the project is left
+     * exactly as it was - a half-applied plan would be worse than none, since
+     * there would be nothing to point undo at.
+     */
+    applyPlan: (steps) =>
+      apply((draft, list: PlanStepInput[]) => {
+        for (const step of list) {
+          const mutate = mutators[step.mutator] as (
+            draft: Project,
+            input: unknown,
+          ) => void
+          mutate(draft, step.input)
+        }
+      }, steps),
     splitSegmentAt: (input) => apply(mutators.splitSegmentAt, input),
     setSegmentBlendMode: (input) =>
       apply(mutators.setSegmentBlendMode, input),

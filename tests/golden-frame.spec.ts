@@ -294,3 +294,75 @@ test('a different frame does not match, so the comparison is real', async ({
 
   expect(meanChannelDifference(golden, neighbour)).toBeGreaterThan(3)
 })
+
+test('a composition too big for a screen previews smaller, and still correctly', async ({
+  page,
+}) => {
+  // Portrait 4K is eight and a half megapixels sixty times a second, composited
+  // into a canvas a few hundred pixels wide. The preview draws onto a smaller
+  // surface and scales its context ONCE - the same trick the export uses for a
+  // different output size - so this can only ever be the same picture drawn
+  // smaller, never a second render path.
+  const info = await page.evaluate(
+    (spec) => window.harness.loadProject(spec),
+    { ...WHOLE_SOURCE_A, composition: { width: 2160, height: 3840 } },
+  )
+
+  // The composition is unchanged: what the project is authored at is not what
+  // the preview happens to be drawn on.
+  expect(info).toMatchObject({ width: 2160, height: 3840 })
+
+  const surface = await page.evaluate(() => {
+    const canvas = document.querySelector('canvas')!
+    return { width: canvas.width, height: canvas.height }
+  })
+  expect(surface).toEqual({ width: 1080, height: 1920 })
+})
+
+test('an ordinary composition is previewed at its own size', async ({
+  page,
+}) => {
+  // The cap is not a quality setting. 1080p and everything under it - which is
+  // every fixture - is drawn at its own size and never resampled.
+  await page.evaluate((spec) => window.harness.loadProject(spec), WHOLE_SOURCE_A)
+
+  const surface = await page.evaluate(() => {
+    const canvas = document.querySelector('canvas')!
+    return { width: canvas.width, height: canvas.height }
+  })
+  expect(surface).toEqual({ width: FIXTURE.width, height: FIXTURE.height })
+})
+
+test('a rotated clip renders the same in the preview and the export', async ({
+  page,
+}) => {
+  // Rotation is a transform like any other, which means the export gets it for
+  // free - there is ONE render function and both sides call it. A transform
+  // applied on only one side is the exact failure this whole file exists to
+  // catch, and a new one is worth pointing at it.
+  await page.evaluate(
+    (spec) => window.harness.loadProject(spec),
+    {
+      ...WHOLE_SOURCE_A,
+      clips: WHOLE_SOURCE_A.clips.map((clip) => ({
+        ...clip,
+        properties: { rotation: 90 },
+      })),
+    },
+  )
+
+  const preview = await page.evaluate(
+    (t) => window.harness.pixelsAt(t),
+    INSIDE_A,
+  )
+
+  const exported = await page.evaluate(() => window.harness.exportMp4())
+  expect(exported.byteLength).toBeGreaterThan(0)
+  await page.evaluate(() => window.harness.loadExported())
+
+  expectMatch(
+    'a quarter turn',
+    preview,
+    await page.evaluate((t) => window.harness.pixelsAt(t), INSIDE_A),
+  )
+})

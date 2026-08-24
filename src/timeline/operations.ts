@@ -23,6 +23,8 @@ import {
   segmentCovers,
   segmentDuration,
   segmentEndMicros,
+  segmentRate,
+  soundContent,
   trackAllowsOverlap,
   type Composition,
   type Project,
@@ -234,6 +236,20 @@ export type TrimInput = {
   timelineMicros: number
 }
 
+export type KeepSourceSpansInput = {
+  segmentId: string
+  /**
+   * The parts of the source to keep, in order and not overlapping. Every one
+   * must lie inside the segment's current range.
+   */
+  spans: { startMicros: number; endMicros: number }[]
+  /**
+   * Ids for the pieces after the first, which keeps the original's id. Passed
+   * in so the operation stays deterministic.
+   */
+  newSegmentIds: string[]
+}
+
 export type DuplicateSegmentInput = {
   segmentId: string
   /** Id for the copy. Passed in so the operation stays deterministic. */
@@ -376,6 +392,34 @@ export const mutators = {
       throw new Error('A source must have a positive duration.')
     }
     project.sources[source.id] = { ...source }
+  },
+
+  /**
+   * Forgets a file, and everything that was playing it.
+   *
+   * The segments have to go with it: one pointing at a source the project no
+   * longer knows would draw nothing and could not be explained to anyone
+   * looking at it. They leave gaps rather than closing up, exactly as deleting
+   * one by hand does - closing up would move footage the user never asked to
+   * move.
+   *
+   * This is why removal is a single operation rather than "delete the clips,
+   * then drop the source": as one step it is one thing to undo, and there is no
+   * moment in between where the project references a source that is gone.
+   */
+  removeSource(project: Project, sourceId: string): void {
+    if (!project.sources[sourceId]) {
+      throw new Error(`No source with id ${sourceId}.`)
+    }
+
+    for (const track of project.tracks) {
+      track.segments = track.segments.filter((segment) => {
+        const content = segment.content
+        return content.kind === 'text' || content.sourceId !== sourceId
+      })
+    }
+
+    delete project.sources[sourceId]
   },
 
   addTrack(project: Project, input: AddTrackInput): void {
@@ -1065,6 +1109,108 @@ export const mutators = {
   },
 
   /**
+   * Replaces a segment with the parts of it worth keeping.
+   *
+   * This is what trimming silence does once something has decided WHICH parts
+   * those are - and that decision is not made here, because it needs the
+   * waveform and the waveform is not part of the project. See `silence.ts`.
+   *
+   * The pieces are laid end to end from where the original started, so the
+   * sound is continuous rather than pockmarked with the gaps that were removed.
+   * Everything after them on a packed row moves earlier by however much came
+   * out; the row stays packed, exactly as applying a transition keeps it packed
+   * by pulling things the other way.
+   *
+   * Only the first piece keeps a transition into it. The rest begin at a cut
+   * this operation just made, and there is nothing behind them to blend from.
+   */
+  keepSourceSpans(project: Project, input: KeepSourceSpansInput): void {
+    const { track, segment, index } = requireSegment(project, input.segmentId)
+
+    const sound = soundContent(segment)
+    if (!sound) {
+      throw new Error('Text has no source to keep parts of.')
+    }
+
+    if (input.spans.length === 0) {
+      throw new Error(
+        'Keeping nothing would delete the segment; remove it instead.',
+      )
+    }
+
+    let previousEnd = sound.sourceInMicros
+    for (const span of input.spans) {
+      assertIntegerMicros(span.startMicros, 'span startMicros')
+      assertIntegerMicros(span.endMicros, 'span endMicros')
+
+      if (span.startMicros < previousEnd) {
+        throw new Error('Spans have to be in order and must not overlap.')
+      }
+      if (span.endMicros <= span.startMicros) {
+        throw new Error('A span must cover some time.')
+      }
+      if (span.endMicros > sound.sourceOutMicros) {
+        throw new Error(
+          `A span reaching ${span.endMicros}us is outside the segment's range.`,
+        )
+      }
+      previousEnd = span.endMicros
+    }
+
+    if (input.newSegmentIds.length < input.spans.length - 1) {
+      throw new Error(
+        `Keeping ${input.spans.length} spans needs ${input.spans.length - 1} new ids.`,
+      )
+    }
+    for (const id of input.newSegmentIds.slice(0, input.spans.length - 1)) {
+      assertSegmentIdFree(project, id)
+    }
+
+    const rate = segmentRate(segment)
+    const before = segmentDuration(segment)
+
+    // Built as a list first: the row has to be left in one consistent state
+    // rather than passing through several as pieces are spliced in.
+    const pieces: Segment[] = []
+    let start = segment.timelineStartMicros
+
+    input.spans.forEach((span, position) => {
+      // Timeline state is plain JSON, so a round trip through it is a complete
+      // copy - keyframes and effects included, sharing nothing with the others.
+      // structuredClone cannot be used here: this runs on an immer draft, and
+      // a draft is a Proxy.
+      const piece: Segment = {
+        ...(JSON.parse(JSON.stringify(segment)) as Segment),
+        id: position === 0 ? segment.id : input.newSegmentIds[position - 1]!,
+        timelineStartMicros: start,
+        content: {
+          ...sound,
+          sourceInMicros: span.startMicros,
+          sourceOutMicros: span.endMicros,
+        },
+      }
+
+      if (position > 0) delete piece.transitionIn
+
+      pieces.push(piece)
+      start += Math.round((span.endMicros - span.startMicros) / rate)
+    })
+
+    const after = start - segment.timelineStartMicros
+    const removed = before - after
+
+    track.segments.splice(index, 1, ...pieces)
+
+    if (removed > 0 && !trackAllowsOverlap(track.kind)) {
+      for (const later of track.segments.slice(index + pieces.length)) {
+        later.timelineStartMicros -= removed
+      }
+    }
+
+    sortSegments(track)
+  },
+
+  /**
    * Puts a copy of a segment immediately after it.
    *
    * A packed row has no room for one, so everything after moves along by the
@@ -1179,6 +1325,9 @@ export const setComposition = (
 export const addSource = (project: Project, source: Source): Project =>
   produce(project, (draft) => mutators.addSource(draft, source))
 
+export const removeSource = (project: Project, sourceId: string): Project =>
+  produce(project, (draft) => mutators.removeSource(draft, sourceId))
+
 export const setExportSettings = (
   project: Project,
   args: Partial<ExportSettings>,
@@ -1213,6 +1362,12 @@ export const trimSegmentEnd = (project: Project, args: TrimInput): Project =>
 
 export const setTextStyle = (project: Project, args: TextStyleInput): Project =>
   produce(project, (draft) => mutators.setTextStyle(draft, args))
+
+export const keepSourceSpans = (
+  project: Project,
+  input: KeepSourceSpansInput,
+): Project =>
+  produce(project, (draft) => mutators.keepSourceSpans(draft, input))
 
 export const duplicateSegment = (
   project: Project,

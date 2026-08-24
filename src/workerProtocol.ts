@@ -61,6 +61,15 @@ export type AudioChunk = {
  */
 export const WAVEFORM_BUCKETS_PER_SECOND = 50
 
+/**
+ * What the transcriber wants: 16kHz mono.
+ *
+ * Whisper resamples to this internally whatever it is given, so doing it here
+ * means sending a quarter of the bytes rather than sending 48kHz stereo and
+ * having it thrown away at the other end.
+ */
+export const TRANSCRIBE_SAMPLE_RATE = 16_000
+
 /** How many undelivered audio chunks the worker keeps ahead of the playhead. */
 export const AUDIO_BUFFER_MAX_CHUNKS = 64
 
@@ -99,6 +108,25 @@ export type MainToWorker =
   | { type: 'frameCounts'; generation: number }
   /** Asks for the waveform of a source, which is measured once and kept. */
   | { type: 'peaks'; generation: number; sourceId: string }
+  /** Asks for a source's audio as 16kHz mono, for transcribing. */
+  | { type: 'transcribeAudio'; generation: number; sourceId: string }
+  /**
+   * Asks for a source to be sampled as pictures, for looking at.
+   *
+   * Not a render: these are the source's own frames, undecorated by any
+   * transform, effect or caption the timeline puts on them. What is being asked
+   * is what was FILMED, which is a property of the file - the same thing the
+   * waveform and the transcript are - and it stays true across every edit.
+   */
+  | {
+      type: 'sampleFrames'
+      generation: number
+      sourceId: string
+      /** How often to take one, in microseconds. */
+      everyMicros: number
+      /** A hard stop, so a long film cannot decode for ever. */
+      maxFrames: number
+    }
 
 export type WorkerToMain =
   | {
@@ -143,5 +171,30 @@ export type WorkerToMain =
       /** Loudest sample in each bucket, from 0 to 1. Empty when silent. */
       peaks: Float32Array<ArrayBuffer>
       bucketsPerSecond: number
+    }
+  | {
+      type: 'transcribeAudio'
+      generation: number
+      sourceId: string
+      /** 16kHz mono. Empty when the source carries no sound. */
+      samples: Float32Array<ArrayBuffer>
+      sampleRate: number
+    }
+  | {
+      type: 'sampleFrames'
+      generation: number
+      sourceId: string
+      frames: {
+        atMicros: number
+        /** The picture, as JPEG bytes, scaled down to something sendable. */
+        jpeg: ArrayBuffer
+        /**
+         * Brightnesses on a small grid, for telling one shot from the next
+         * without keeping the pictures. See `assistant/shots.ts`.
+         */
+        grid: number[]
+      }[]
+      /** Set when the source has no picture, or could not be read. */
+      error?: string
     }
   | { type: 'error'; generation: number; message: string }

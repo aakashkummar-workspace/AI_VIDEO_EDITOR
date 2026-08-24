@@ -153,3 +153,27 @@ test('a verb is one undo step, like the key it stands for', async ({ page }) => 
   await page.keyboard.press('Control+z')
   expect(await clipCount(page)).toBe(1)
 })
+
+test('Trim silence declines when there is nothing to cut', async ({ page }) => {
+  // The fixtures carry a continuous tone from end to end - there is no silence
+  // in any of them - so this is the case the committed media can actually
+  // prove: the verb must decline rather than cut something arbitrary.
+  await page.getByTestId('clip').click()
+
+  await expect(page.getByTestId('verb-trim-silence')).toBeDisabled()
+  await expect(page.getByTestId('verb-trim-silence')).toHaveAttribute(
+    'title',
+    /No silence worth cutting/,
+  )
+})
+
+test('Trim silence is dead until something with sound is selected', async ({
+  page,
+}) => {
+  await expect(page.getByTestId('verb-trim-silence')).toBeDisabled()
+
+  // A caption makes no sound, so there is nothing to trim out of it.
+  await page.getByTestId('add-overlay').click()
+  await expect(page.getByTestId('overlay-block')).toHaveCount(1)
+  await expect(page.getByTestId('verb-trim-silence')).toBeDisabled()
+})

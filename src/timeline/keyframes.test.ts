@@ -127,6 +127,7 @@ describe('transformAt', () => {
       scale: 0.5,
       x: 40,
       y: 0,
+      rotation: 0,
       opacity: 1,
     })
   })
@@ -226,6 +227,7 @@ describe('setSegmentTransform', () => {
       scale: 2,
       x: 15,
       y: 0,
+      rotation: 0,
       opacity: 1,
     })
   })
@@ -561,5 +563,54 @@ describe('text is animated the same way', () => {
     })
 
     expect(transformAt(segmentById(project, 'text-1'), SECOND).y).toBe(100)
+  })
+})
+
+describe('rotation', () => {
+  it('is nothing at all unless somebody asks for it', () => {
+    // An identity transform has to stay identity, or the golden-frame
+    // comparison between preview and export stops meaning anything.
+    expect(transformAt(segmentById(oneClip(), 'clip-1'), 1 * SECOND).rotation)
+      .toBe(0)
+  })
+
+  it('is a plain property, so it keyframes like the rest', () => {
+    let project = oneClip()
+    project = addKeyframe(project, {
+      segmentId: 'clip-1',
+      property: 'rotation',
+      offsetMicros: 0,
+      value: 0,
+    })
+    project = addKeyframe(project, {
+      segmentId: 'clip-1',
+      property: 'rotation',
+      offsetMicros: 2 * SECOND,
+      value: 180,
+    })
+
+    // Offsets are from the segment head, which is at 1s on the timeline.
+    const at = (micros: number) =>
+      transformAt(segmentById(project, 'clip-1'), micros).rotation
+
+    expect(at(1 * SECOND)).toBe(0)
+    expect(at(2 * SECOND)).toBe(90)
+    expect(at(3 * SECOND)).toBe(180)
+  })
+
+  it('is clamped to a single turn either way', () => {
+    // Wider would only ever mean the same picture, and a spin of more than one
+    // turn is several keyframes rather than a bigger number.
+    let project = setSegmentProperties(oneClip(), {
+      segmentId: 'clip-1',
+      rotation: 900,
+    })
+    expect(transformAt(segmentById(project, 'clip-1'), 0).rotation).toBe(360)
+
+    project = setSegmentProperties(oneClip(), {
+      segmentId: 'clip-1',
+      rotation: -900,
+    })
+    expect(transformAt(segmentById(project, 'clip-1'), 0).rotation).toBe(-360)
   })
 })

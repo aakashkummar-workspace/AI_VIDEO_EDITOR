@@ -5,6 +5,7 @@ import {
   type ClockAnchor,
 } from './audioSync'
 import { frameCounts, installFrameTracking } from './frameTracker'
+import { previewScaleFor, previewSizeFor } from './previewSize'
 import { renderFrame, selectFrame } from './playback'
 import { timelineDuration } from './timeline/operations'
 import { emptyProject, type Project } from './timeline/types'
@@ -232,6 +233,17 @@ export function createPlayer(
     string,
     (result: { peaks: Float32Array; bucketsPerSecond: number }) => void
   >()
+  const pendingTranscribeAudio = new Map<
+    string,
+    (result: { samples: Float32Array; sampleRate: number }) => void
+  >()
+  const pendingSampleFrames = new Map<
+    string,
+    (result: {
+      frames: { atMicros: number; jpeg: ArrayBuffer; grid: number[] }[]
+      error?: string
+    }) => void
+  >()
 
   function send(message: MainToWorker, transfer: Transferable[] = []) {
     worker.postMessage(message, transfer)
@@ -278,13 +290,26 @@ export function createPlayer(
 
   /** The one render call on this thread. */
   function paint(item: BufferedItem) {
+    const context = context2d()
     try {
+      // The SAME trick the export uses, for the same reason: renderFrame draws
+      // in composition coordinates and knows nothing about the surface. Scaling
+      // the context once means a smaller preview can only ever be the same
+      // picture drawn smaller - never a second render path.
+      const scale = previewScaleFor(project.composition)
+      if (scale !== 1) {
+        context.save()
+        context.scale(scale, scale)
+      }
+
       renderFrame(
-        context2d(),
+        context,
         project,
         item.timelineMicros,
         new Map(item.layers.map((layer) => [layer.segmentId, layer.frame])),
       )
+
+      if (scale !== 1) context.restore()
     } finally {
       closeItem(item)
     }
@@ -481,6 +506,24 @@ export function createPlayer(
       return
     }
 
+    if (message.type === 'transcribeAudio') {
+      pendingTranscribeAudio.get(message.sourceId)?.({
+        samples: message.samples,
+        sampleRate: message.sampleRate,
+      })
+      pendingTranscribeAudio.delete(message.sourceId)
+      return
+    }
+
+    if (message.type === 'sampleFrames') {
+      pendingSampleFrames.get(message.sourceId)?.({
+        frames: message.frames,
+        ...(message.error ? { error: message.error } : {}),
+      })
+      pendingSampleFrames.delete(message.sourceId)
+      return
+    }
+
     if (message.type === 'peaks') {
       pendingPeaks.get(message.sourceId)?.({
         peaks: message.peaks,
@@ -562,11 +605,12 @@ export function createPlayer(
       // Assigning width or height resets a canvas even when the value is
       // unchanged, so only touch them when the composition really changed.
       // Otherwise every edit blanks the preview for a frame and a drag flickers.
-      if (canvas.width !== next.composition.width) {
-        canvas.width = next.composition.width
+      const surface = previewSizeFor(next.composition)
+      if (canvas.width !== surface.width) {
+        canvas.width = surface.width
       }
-      if (canvas.height !== next.composition.height) {
-        canvas.height = next.composition.height
+      if (canvas.height !== surface.height) {
+        canvas.height = surface.height
       }
 
       send({ type: 'setProject', generation, project: next })
@@ -585,6 +629,42 @@ export function createPlayer(
       return new Promise((resolve) => {
         pendingPeaks.set(sourceId, resolve)
         send({ type: 'peaks', generation, sourceId })
+      })
+    },
+
+    /**
+     * A source's audio as 16kHz mono, for transcribing.
+     *
+     * Not tied to the generation, for the same reason the waveform is not: what
+     * a file says does not change because the timeline did.
+     */
+    sourceAudioForTranscription(
+      sourceId: string,
+    ): Promise<{ samples: Float32Array; sampleRate: number }> {
+      return new Promise((resolve) => {
+        pendingTranscribeAudio.set(sourceId, resolve)
+        send({ type: 'transcribeAudio', generation, sourceId })
+      })
+    },
+
+    /**
+     * Takes pictures of a source at intervals, for something to look at.
+     *
+     * The source's own frames, not the timeline's - undecorated by any
+     * transform, effect or caption - because what is being asked is what was
+     * filmed, which is a property of the file.
+     */
+    sampleSourceFrames(
+      sourceId: string,
+      everyMicros: number,
+      maxFrames: number,
+    ): Promise<{
+      frames: { atMicros: number; jpeg: ArrayBuffer; grid: number[] }[]
+      error?: string
+    }> {
+      return new Promise((resolve) => {
+        pendingSampleFrames.set(sourceId, resolve)
+        send({ type: 'sampleFrames', generation, sourceId, everyMicros, maxFrames })
       })
     },
 

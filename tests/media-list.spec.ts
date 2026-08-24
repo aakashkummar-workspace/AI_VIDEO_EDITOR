@@ -135,3 +135,76 @@ function formatted(micros: number): string {
     hundredths,
   ).padStart(2, '0')}`
 }
+
+test.describe('removing a file', () => {
+  test('takes the clips that were playing it', async ({ page }) => {
+    await loadFile(page, FIXTURE.path, 1)
+    await loadFile(page, FIXTURE_B.path, 2)
+    await expect(page.getByTestId('clip')).toHaveCount(2)
+
+    // The first tile is the first file, and its clip is the one that must go.
+    await page.getByTestId('remove-source').first().click()
+
+    await expect(page.getByTestId('media-item')).toHaveCount(1)
+    await expect(page.getByTestId('clip')).toHaveCount(1)
+
+    const remaining = await clips(page)
+    expect(remaining).toHaveLength(1)
+  })
+
+  test('says on the button what removing it will cost', async ({ page }) => {
+    await loadFile(page, FIXTURE.path, 1)
+
+    // There is no dialog here - undo is the safety net - so the count has to be
+    // on the button, or a click is a surprise.
+    await expect(page.getByTestId('remove-source')).toHaveAttribute(
+      'title',
+      /1 clip using it/,
+    )
+
+    await page.getByTestId('add-to-timeline').click()
+    await expect(page.getByTestId('clip')).toHaveCount(2)
+
+    await expect(page.getByTestId('remove-source')).toHaveAttribute(
+      'title',
+      /2 clips using it/,
+    )
+  })
+
+  test('is one undo step, which brings the clips back offline', async ({
+    page,
+  }) => {
+    await loadFile(page, FIXTURE.path, 1)
+    await expect(page.getByTestId('clip')).toHaveCount(1)
+
+    const depthBefore = await page.evaluate(
+      () => window.__timelineStore.getState().past.length,
+    )
+
+    await page.getByTestId('remove-source').click()
+    await expect(page.getByTestId('clip')).toHaveCount(0)
+    expect(
+      await page.evaluate(() => window.__timelineStore.getState().past.length),
+    ).toBe(depthBefore + 1)
+
+    await page.keyboard.press('Control+z')
+
+    // The timeline comes back. The FILE does not - a File cannot be resurrected
+    // from an undo patch - so the source is offline and waiting to be relinked,
+    // which is the same state a reopened draft starts in.
+    await expect(page.getByTestId('clip')).toHaveCount(1)
+    await expect(page.getByTestId('offline-panel')).toBeVisible()
+  })
+
+  test('leaves the inspector empty rather than describing a clip that is gone', async ({
+    page,
+  }) => {
+    await loadFile(page, FIXTURE.path, 1)
+    await page.getByTestId('clip').click()
+    await expect(page.getByTestId('inspector-empty')).toHaveCount(0)
+
+    await page.getByTestId('remove-source').click()
+
+    await expect(page.getByTestId('inspector-empty')).toBeVisible()
+  })
+})

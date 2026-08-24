@@ -31,3 +31,13 @@ playwright/.cache
 
 # Real media used for one-off measurements, never committed
 tmp-media/
+
+# The API key the assistant uses. Never commit this.
+.env
+.env.local
+
+# The live bridge writes the current timeline here for an agent to read.
+live/
+
+# The transcription sidecar lives here; it is a big download, not source.
+.venv/

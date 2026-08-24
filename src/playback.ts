@@ -20,12 +20,18 @@ import {
 
 export const MICROS_PER_SECOND = 1_000_000
 
-/** Sink boundary: mediabunny speaks seconds as floats, we speak integer microseconds. */
+/**
+ * Boundary: out to something that speaks seconds as floats - mediabunny's sink,
+ * or the assistant's outline. Everything inside speaks integer microseconds.
+ */
 export function microsToSeconds(micros: number): number {
   return micros / MICROS_PER_SECOND
 }
 
-/** Sink boundary: seconds from mediabunny back into our integer microseconds. */
+/**
+ * Boundary: seconds from mediabunny, or from a model's tool call, back into our
+ * integer microseconds. Rounding here is what keeps that promise whole.
+ */
 export function secondsToMicros(seconds: number): number {
   return Math.round(seconds * MICROS_PER_SECOND)
 }
@@ -446,9 +452,18 @@ export function withTransform(
     context.globalAlpha = Math.min(1, transform.opacity)
     context.translate(transform.x, transform.y)
 
-    if (transform.scale !== 1) {
+    // Rotation and scale share an origin and are applied together, so a clip
+    // that is both turned and scaled stays put instead of orbiting its own
+    // corner. Guarded so that an identity transform emits no matrix at all -
+    // that is what keeps the golden-frame comparison byte for byte.
+    if (transform.scale !== 1 || transform.rotation !== 0) {
       context.translate(origin.x, origin.y)
-      context.scale(transform.scale, transform.scale)
+      if (transform.rotation !== 0) {
+        context.rotate((transform.rotation * Math.PI) / 180)
+      }
+      if (transform.scale !== 1) {
+        context.scale(transform.scale, transform.scale)
+      }
       context.translate(-origin.x, -origin.y)
     }
 

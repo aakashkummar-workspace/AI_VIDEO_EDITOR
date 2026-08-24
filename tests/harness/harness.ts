@@ -240,6 +240,8 @@ export type ProjectSpec = {
     sourceInMicros: number
     sourceOutMicros: number
     timelineStartMicros: number
+    /** Fixed transform values, for checking one renders the same on both sides. */
+    properties?: Record<string, number>
   }[]
 }
 
@@ -273,7 +275,7 @@ async function loadProject(spec: ProjectSpec) {
     })
   }
 
-  spec.clips.forEach((clip, index) =>
+  spec.clips.forEach((clip, index) => {
     store.addSegment({
       trackId: MAIN_VIDEO_TRACK_ID,
       segment: {
@@ -286,8 +288,15 @@ async function loadProject(spec: ProjectSpec) {
           sourceOutMicros: clip.sourceOutMicros,
         },
       },
-    }),
-  )
+    })
+
+    if (clip.properties) {
+      store.setSegmentProperties({
+        segmentId: `clip-${index}`,
+        ...clip.properties,
+      })
+    }
+  })
 
   const project = useTimelineStore.getState().project
   player.setProject(project)

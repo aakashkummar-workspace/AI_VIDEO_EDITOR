@@ -56,6 +56,7 @@ import {
 import {
   AUDIO_BUFFER_MAX_CHUNKS,
   BUFFER_AHEAD_MICROS,
+  TRANSCRIBE_SAMPLE_RATE,
   WAVEFORM_BUCKETS_PER_SECOND,
   BUFFER_MAX_FRAMES,
   BUFFER_MAX_ITEMS,
@@ -775,6 +776,75 @@ async function measurePeaks(sourceId: string): Promise<{
   return { peaks, bucketsPerSecond: WAVEFORM_BUCKETS_PER_SECOND }
 }
 
+/**
+ * A source's audio as 16kHz mono, which is what the transcriber wants.
+ *
+ * The same walk `measurePeaks` does, keeping the samples instead of reducing
+ * them to a maximum per bucket. Decoding here rather than outside the browser is
+ * what keeps the "no ffmpeg anywhere" rule intact: WebCodecs does the decoding,
+ * exactly as it does for the preview and the export, and what leaves is plain
+ * PCM.
+ *
+ * Resampled by nearest neighbour. For speech recognition that is enough - the
+ * model band-limits its input anyway - and an interpolating resampler here would
+ * be precision nobody can hear spent on a step that exists to save bytes.
+ */
+async function decodeForTranscription(
+  sourceId: string,
+): Promise<Float32Array<ArrayBuffer>> {
+  const opened = await openSource(sourceId)
+  const track = opened.audioTrack
+  if (!track) return new Float32Array(0) as Float32Array<ArrayBuffer>
+
+  const seconds = opened.geometry.durationMicros / 1e6
+  const out = new Float32Array(
+    Math.max(1, Math.ceil(seconds * TRANSCRIBE_SAMPLE_RATE)),
+  ) as Float32Array<ArrayBuffer>
+
+  const samples = new AudioSampleSink(track).samples(0, undefined)
+  try {
+    for await (const sample of samples) {
+      try {
+        const frames = sample.numberOfFrames
+        if (frames === 0) continue
+
+        const channels = sample.numberOfChannels
+        const rate = sample.sampleRate
+        const startSeconds = sample.timestamp
+
+        // Mixed rather than taking one channel: the words are in both, and
+        // half the signal is worth more than the arithmetic costs.
+        const mono = new Float32Array(frames)
+        const plane = new Float32Array(frames)
+        for (let channel = 0; channel < channels; channel++) {
+          sample.copyTo(plane, { planeIndex: channel, format: 'f32-planar' })
+          for (let i = 0; i < frames; i++) mono[i]! += plane[i]! / channels
+        }
+
+        // Walk the OUTPUT indices this sample covers, so every one is written
+        // exactly once however the rates relate.
+        const from = Math.ceil(startSeconds * TRANSCRIBE_SAMPLE_RATE)
+        const to = Math.floor(
+          (startSeconds + frames / rate) * TRANSCRIBE_SAMPLE_RATE,
+        )
+        for (let index = from; index < to && index < out.length; index++) {
+          if (index < 0) continue
+          const at = Math.round(
+            (index / TRANSCRIBE_SAMPLE_RATE - startSeconds) * rate,
+          )
+          out[index] = mono[Math.min(frames - 1, Math.max(0, at))]!
+        }
+      } finally {
+        sample.close()
+      }
+    }
+  } finally {
+    await samples.return()
+  }
+
+  return out
+}
+
 function postAudioChunk(
   chunk: AudioChunk,
   mode: 'play' | 'export',
@@ -817,6 +887,129 @@ function postFrame(
  * faded segment lets what is under it show through, and a paused preview has
  * to show the same picture playback would.
  */
+/** The longest side a sampled frame is scaled to before it is sent anywhere. */
+const VISION_FRAME_PX = 512
+
+/** The grid a frame is reduced to for telling shots apart. 8x8 is 64 numbers. */
+const SHOT_GRID = 8
+
+/**
+ * Takes pictures of a source at intervals.
+ *
+ * One decode, two products: a small JPEG for a model to look at, and an 8x8 grid
+ * of brightnesses for `shots.ts` to compare. Measuring the grid here, while the
+ * frame is decoded and already on a canvas, is what lets shot detection be pure
+ * arithmetic on numbers rather than something that needs the pictures kept.
+ *
+ * Every sample and every frame is closed in a `finally`, including on the paths
+ * that give up early - `getSample` hands back a VideoSample that owns a frame,
+ * `toVideoFrame` makes a second handle, and the leak test counts both.
+ */
+async function sampleFrames(
+  sourceId: string,
+  everyMicros: number,
+  maxFrames: number,
+): Promise<
+  { atMicros: number; jpeg: ArrayBuffer; grid: number[] }[]
+> {
+  const opened = await openSource(sourceId)
+  if (!opened.track) return []
+
+  const durationMicros = opened.geometry.durationMicros
+  const step = Math.max(1, Math.round(everyMicros))
+  const out: { atMicros: number; jpeg: ArrayBuffer; grid: number[] }[] = []
+
+  const sink = new VideoSampleSink(opened.track)
+
+  // Sized from the first frame, since every frame of a source is the same size.
+  let canvas: OffscreenCanvas | null = null
+  let context: OffscreenCanvasRenderingContext2D | null = null
+
+  for (
+    let atMicros = 0;
+    atMicros < durationMicros && out.length < maxFrames;
+    atMicros += step
+  ) {
+    const sample = await sink.getSample(microsToSeconds(atMicros))
+    if (!sample) continue
+
+    const frame = takeFrame(sample)
+    try {
+      if (!canvas) {
+        const scale = Math.min(
+          1,
+          VISION_FRAME_PX / Math.max(frame.displayWidth, frame.displayHeight),
+        )
+        canvas = new OffscreenCanvas(
+          Math.max(1, Math.round(frame.displayWidth * scale)),
+          Math.max(1, Math.round(frame.displayHeight * scale)),
+        )
+        context = canvas.getContext('2d')
+        if (!context) return out
+      }
+
+      context!.drawImage(frame, 0, 0, canvas.width, canvas.height)
+
+      const blob = await canvas.convertToBlob({
+        type: 'image/jpeg',
+        quality: 0.7,
+      })
+
+      out.push({
+        atMicros: Math.round(sample.microsecondTimestamp),
+        jpeg: await blob.arrayBuffer(),
+        grid: gridOf(context!, canvas.width, canvas.height),
+      })
+    } finally {
+      frame.close()
+    }
+  }
+
+  return out
+}
+
+/**
+ * A frame reduced to an 8x8 grid of brightnesses.
+ *
+ * Averaged over each cell rather than sampled at its centre: a single pixel is
+ * noise, and two frames of the same static shot would differ by whatever the
+ * sensor did that instant.
+ */
+function gridOf(
+  context: OffscreenCanvasRenderingContext2D,
+  width: number,
+  height: number,
+): number[] {
+  const { data } = context.getImageData(0, 0, width, height)
+  const grid: number[] = []
+
+  for (let row = 0; row < SHOT_GRID; row++) {
+    for (let column = 0; column < SHOT_GRID; column++) {
+      const fromX = Math.floor((column * width) / SHOT_GRID)
+      const toX = Math.max(fromX + 1, Math.floor(((column + 1) * width) / SHOT_GRID))
+      const fromY = Math.floor((row * height) / SHOT_GRID)
+      const toY = Math.max(fromY + 1, Math.floor(((row + 1) * height) / SHOT_GRID))
+
+      let total = 0
+      let count = 0
+      for (let y = fromY; y < toY; y++) {
+        for (let x = fromX; x < toX; x++) {
+          const at = (y * width + x) * 4
+          // Rec. 601 luma: the eye is far more sensitive to green than to blue,
+          // and an unweighted average would call a blue shot and a green one
+          // equally bright.
+          total +=
+            0.299 * data[at]! + 0.587 * data[at + 1]! + 0.114 * data[at + 2]!
+          count++
+        }
+      }
+      grid.push(Math.round(total / count))
+    }
+  }
+
+  return grid
+}
+
 async function seek(timelineMicros: number, myGeneration: number) {
   const current = requireProject()
   const wanted = visibleVideoSegmentsAt(current, timelineMicros)
@@ -1146,12 +1339,17 @@ scope.addEventListener('message', (event) => {
 
     case 'setProject':
       project = message.project
-      // Drop sources the project no longer references.
+      // Close the DECODER for anything the project no longer references, which
+      // is where the demuxer, the buffers and the open handle live.
+      //
+      // The FILE is kept, and that distinction matters now there is more than
+      // one project: switching to another one sends a project whose sources are
+      // all different, and dropping the files here would leave the project
+      // being left with nothing to decode from the moment somebody came back to
+      // it. A File is a lazy handle rather than the bytes, so keeping it costs
+      // almost nothing; the decoder is what was expensive, and that still goes.
       for (const sourceId of [...sources.keys()]) {
-        if (!message.project.sources[sourceId]) {
-          closeSource(sourceId)
-          files.delete(sourceId)
-        }
+        if (!message.project.sources[sourceId]) closeSource(sourceId)
       }
       return
 
@@ -1202,6 +1400,59 @@ scope.addEventListener('message', (event) => {
         openSources: sources.size,
       })
       return
+
+    case 'transcribeAudio': {
+      const { sourceId, generation: asked } = message
+      // Not guarded by the generation, for the same reason a waveform is not:
+      // what a file says is a property of the file.
+      void decodeForTranscription(sourceId)
+        .then((samples) => {
+          scope.postMessage(
+            {
+              type: 'transcribeAudio',
+              generation: asked,
+              sourceId,
+              samples,
+              sampleRate: TRANSCRIBE_SAMPLE_RATE,
+            },
+            [samples.buffer],
+          )
+        })
+        .catch((error) => {
+          console.warn('[worker] could not decode audio to transcribe:', error)
+          scope.postMessage({
+            type: 'transcribeAudio',
+            generation: asked,
+            sourceId,
+            samples: new Float32Array(0),
+            sampleRate: TRANSCRIBE_SAMPLE_RATE,
+          })
+        })
+      return
+    }
+
+    case 'sampleFrames': {
+      const { sourceId, generation: asked, everyMicros, maxFrames } = message
+      // Not guarded by the generation, for the same reason the waveform and the
+      // transcript are not: what a file LOOKS like is a property of the file.
+      void sampleFrames(sourceId, everyMicros, maxFrames)
+        .then((frames) => {
+          scope.postMessage(
+            { type: 'sampleFrames', generation: asked, sourceId, frames },
+            frames.map((frame) => frame.jpeg),
+          )
+        })
+        .catch((error: unknown) => {
+          scope.postMessage({
+            type: 'sampleFrames',
+            generation: asked,
+            sourceId,
+            frames: [],
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
+      return
+    }
 
     case 'peaks': {
       const { sourceId, generation: asked } = message

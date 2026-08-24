@@ -23,6 +23,7 @@ async function columnOf(page: Page, testId: string): Promise<string> {
     if (panel.closest('.inspector')) return 'inspector'
     if (panel.closest('.sidebar')) return 'sidebar'
     if (panel.closest('.actions')) return 'actions'
+    if (panel.closest('.assistant')) return 'assistant'
     return 'elsewhere'
   }, testId)
 }
@@ -41,7 +42,7 @@ test.beforeEach(async ({ page }) => {
 })
 
 test('the project lives on the left', async ({ page }) => {
-  for (const panel of ['export-panel', 'storage-panel']) {
+  for (const panel of ['project-panel', 'export-panel', 'storage-panel']) {
     expect(await columnOf(page, panel), panel).toBe('sidebar')
   }
 })
@@ -82,6 +83,10 @@ test('the verbs live in the strip, and nowhere else', async ({ page }) => {
   for (const verb of [
     'verb-split',
     'verb-duplicate',
+    'verb-trim-silence',
+    'verb-transcribe',
+    'verb-watch',
+    'verb-captions',
     'verb-transition',
     'verb-delete',
     'add-overlay',
@@ -90,6 +95,31 @@ test('the verbs live in the strip, and nowhere else', async ({ page }) => {
     // One button each. A verb duplicated into a column is two things that can
     // disagree about whether they are enabled.
     await expect(page.getByTestId(verb), verb).toHaveCount(1)
+  }
+})
+
+test('the assistant is its own zone, and takes nothing from the others', async ({
+  page,
+}) => {
+  // The fourth zone exists because a request is as likely to be about the whole
+  // timeline as about one clip, so neither column owns it. What it must not do
+  // is start collecting things that DO have a home - a control in two zones is
+  // two things that can disagree about whether it is enabled.
+  expect(await columnOf(page, 'assistant')).toBe('assistant')
+
+  await page.getByTestId('clip').click()
+
+  for (const elsewhere of [
+    'transform-panel',
+    'effects-panel',
+    'speed-panel',
+    'media-list',
+    'export-panel',
+    'verb-split',
+    'verb-delete',
+    'add-overlay',
+  ]) {
+    expect(await columnOf(page, elsewhere), elsewhere).not.toBe('assistant')
   }
 })
 

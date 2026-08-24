@@ -59,13 +59,24 @@ export const DRAFT_VERSION = 1
 export type Draft = {
   kind: 'video-editor-draft'
   version: number
+  /**
+   * What this piece of work is called.
+   *
+   * Beside the project rather than inside it, because a name is not part of the
+   * timeline: nothing renders differently for being called one thing or
+   * another, and `parseDraft` would otherwise have to validate it as though a
+   * frame depended on it. Optional, so a draft written before names existed
+   * still opens.
+   */
+  name?: string
   project: Project
 }
 
-export function toDraft(project: Project): Draft {
+export function toDraft(project: Project, name?: string): Draft {
   return {
     kind: 'video-editor-draft',
     version: DRAFT_VERSION,
+    ...(name ? { name } : {}),
     // Round-tripped rather than referenced, so a draft can never share
     // structure with the live project.
     project: JSON.parse(JSON.stringify(project)) as Project,
@@ -73,8 +84,8 @@ export function toDraft(project: Project): Draft {
 }
 
 /** Serialises a project as the text that goes in the file. */
-export function serializeDraft(project: Project): string {
-  return `${JSON.stringify(toDraft(project), null, 2)}\n`
+export function serializeDraft(project: Project, name?: string): string {
+  return `${JSON.stringify(toDraft(project, name), null, 2)}\n`
 }
 
 class DraftError extends Error {}
@@ -574,6 +585,21 @@ export function parseDraft(value: unknown): Project {
 }
 
 /** Parses the text of a draft file. */
+/**
+ * The name a draft carries, if it has one.
+ *
+ * Read separately from `parseDraft` rather than returned beside the project,
+ * because every caller of that wants a Project and only two want a name -
+ * changing its shape would touch all of them to serve neither.
+ */
+export function draftName(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const name = (value as Record<string, unknown>)['name']
+  return typeof name === 'string' && name.trim().length > 0
+    ? name.trim()
+    : undefined
+}
+
 export function parseDraftText(text: string): Project {
   let value: unknown
   try {

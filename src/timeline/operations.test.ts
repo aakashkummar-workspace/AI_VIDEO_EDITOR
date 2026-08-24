@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   addSegment,
   addSource,
+  keepSourceSpans,
+  removeSource,
   addKeyframe,
   addTrack,
   duplicateSegment,
@@ -10,6 +12,7 @@ import {
   removeSegment,
   removeTrack,
   setComposition,
+  setSegmentRate,
   setTransition,
   splitSegmentAt,
   textSegmentsAt,
@@ -25,6 +28,7 @@ import {
   MAIN_TEXT_TRACK_ID,
   MAIN_VIDEO_TRACK_ID,
   emptyProject,
+  findSegment,
   segmentDuration,
   segmentEndMicros,
   type Project,
@@ -1158,5 +1162,283 @@ describe('composition', () => {
     const project = setComposition(oneClip(), { width: 1080, height: 1080 })
 
     expect(JSON.parse(JSON.stringify(project))).toEqual(project)
+  })
+})
+
+describe('removeSource', () => {
+  it('takes the clips that were playing it with it', () => {
+    // A segment pointing at a source the project no longer knows would draw
+    // nothing and could not be explained to anyone looking at it.
+    let project = addClip(projectWithSources(), {
+      id: 'clip-a',
+      sourceId: source.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 0,
+    })
+    project = addClip(project, {
+      id: 'clip-b',
+      sourceId: otherSource.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 2 * SECOND,
+    })
+
+    project = removeSource(project, source.id)
+
+    expect(project.sources[source.id]).toBeUndefined()
+    expect(findSegment(project, 'clip-a')).toBeUndefined()
+    // The other file, and its clip, are none of this operation's business.
+    expect(project.sources[otherSource.id]).toBeDefined()
+    expect(findSegment(project, 'clip-b')).toBeDefined()
+  })
+
+  it('leaves a gap rather than closing up', () => {
+    // Closing up would move footage nobody asked to move, which is what
+    // deleting a segment by hand already refuses to do.
+    let project = addClip(projectWithSources(), {
+      id: 'clip-a',
+      sourceId: source.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 0,
+    })
+    project = addClip(project, {
+      id: 'clip-b',
+      sourceId: otherSource.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 2 * SECOND,
+    })
+
+    project = removeSource(project, source.id)
+
+    expect(findSegment(project, 'clip-b')!.segment.timelineStartMicros).toBe(
+      2 * SECOND,
+    )
+  })
+
+  it('leaves captions alone, since they play no file', () => {
+    let project = addSegment(projectWithSources(), {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('caption', 0, SECOND),
+    })
+    project = removeSource(project, source.id)
+
+    expect(findSegment(project, 'caption')).toBeDefined()
+  })
+
+  it('refuses a source that is not there', () => {
+    expect(() => removeSource(projectWithSources(), 'src-nope')).toThrow(
+      /No source with id src-nope/,
+    )
+  })
+})
+
+describe('keepSourceSpans', () => {
+  /** A four second clip taken from one second into the source. */
+  function fourSeconds(): Project {
+    return addClip(projectWithSources(), {
+      id: 'clip-1',
+      sourceId: source.id,
+      sourceInMicros: 1 * SECOND,
+      sourceOutMicros: 5 * SECOND,
+      timelineStartMicros: 0,
+    })
+  }
+
+  it('lays the kept parts end to end, closing the gaps', () => {
+    // The whole point: what is kept plays continuously rather than leaving the
+    // holes the silence used to fill.
+    const project = keepSourceSpans(fourSeconds(), {
+      segmentId: 'clip-1',
+      spans: [
+        { startMicros: 1 * SECOND, endMicros: 2 * SECOND },
+        { startMicros: 4 * SECOND, endMicros: 5 * SECOND },
+      ],
+      newSegmentIds: ['clip-1-b'],
+    })
+
+    const [first, second] = clips(project)
+    expect(clips(project)).toHaveLength(2)
+    expect(first!.timelineStartMicros).toBe(0)
+    expect(segmentEndMicros(first!)).toBe(1 * SECOND)
+    expect(second!.timelineStartMicros).toBe(1 * SECOND)
+    expect(segmentEndMicros(second!)).toBe(2 * SECOND)
+  })
+
+  it('keeps the original id for the first piece', () => {
+    // So a selection, and anything else holding the id, still means something.
+    const project = keepSourceSpans(fourSeconds(), {
+      segmentId: 'clip-1',
+      spans: [{ startMicros: 1 * SECOND, endMicros: 3 * SECOND }],
+      newSegmentIds: [],
+    })
+
+    expect(clipById(project, 'clip-1')).toBeDefined()
+    expect(video(clipById(project, 'clip-1')).sourceOutMicros).toBe(3 * SECOND)
+  })
+
+  it('pulls what follows earlier by however much came out', () => {
+    let project = addClip(fourSeconds(), {
+      id: 'clip-2',
+      sourceId: otherSource.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 4 * SECOND,
+    })
+
+    project = keepSourceSpans(project, {
+      segmentId: 'clip-1',
+      spans: [{ startMicros: 1 * SECOND, endMicros: 2 * SECOND }],
+      newSegmentIds: [],
+    })
+
+    // Three of the four seconds went, so the row closes up by three.
+    expect(clipById(project, 'clip-2').timelineStartMicros).toBe(1 * SECOND)
+  })
+
+  it('scales what came out by the rate, not by the source length', () => {
+    // At 2x, removing two seconds of source removes one of timeline.
+    let project = setSegmentRate(fourSeconds(), {
+      segmentId: 'clip-1',
+      rate: 2,
+    })
+    project = addClip(project, {
+      id: 'clip-2',
+      sourceId: otherSource.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 2 * SECOND,
+    })
+
+    project = keepSourceSpans(project, {
+      segmentId: 'clip-1',
+      spans: [{ startMicros: 1 * SECOND, endMicros: 3 * SECOND }],
+      newSegmentIds: [],
+    })
+
+    expect(segmentDuration(clipById(project, 'clip-1'))).toBe(1 * SECOND)
+    expect(clipById(project, 'clip-2').timelineStartMicros).toBe(1 * SECOND)
+  })
+
+  it('gives only the first piece a transition', () => {
+    // The rest start at a cut this operation just made, with nothing behind
+    // them to blend from.
+    let project = addClip(projectWithSources(), {
+      id: 'clip-0',
+      sourceId: otherSource.id,
+      sourceInMicros: 0,
+      sourceOutMicros: 2 * SECOND,
+      timelineStartMicros: 0,
+    })
+    project = addClip(project, {
+      id: 'clip-1',
+      sourceId: source.id,
+      sourceInMicros: 1 * SECOND,
+      sourceOutMicros: 5 * SECOND,
+      timelineStartMicros: 2 * SECOND,
+    })
+    project = setTransition(project, {
+      segmentId: 'clip-1',
+      kind: 'crossfade',
+      durationMicros: SECOND / 2,
+    })
+
+    project = keepSourceSpans(project, {
+      segmentId: 'clip-1',
+      spans: [
+        { startMicros: 1 * SECOND, endMicros: 2 * SECOND },
+        { startMicros: 3 * SECOND, endMicros: 4 * SECOND },
+      ],
+      newSegmentIds: ['clip-1-b'],
+    })
+
+    // The first piece keeps what it was blending from; the second cannot.
+    expect(clipById(project, 'clip-1').transitionIn).toBeDefined()
+    expect(clipById(project, 'clip-1-b').transitionIn).toBeUndefined()
+  })
+
+  it('carries the keyframes and effects onto every piece', () => {
+    const project = keepSourceSpans(
+      addKeyframe(fourSeconds(), {
+        segmentId: 'clip-1',
+        property: 'opacity',
+        offsetMicros: 0,
+        value: 0.5,
+      }),
+      {
+        segmentId: 'clip-1',
+        spans: [
+          { startMicros: 1 * SECOND, endMicros: 2 * SECOND },
+          { startMicros: 3 * SECOND, endMicros: 4 * SECOND },
+        ],
+        newSegmentIds: ['clip-1-b'],
+      },
+    )
+
+    expect(clipById(project, 'clip-1').keyframes?.opacity).toHaveLength(1)
+    expect(clipById(project, 'clip-1-b').keyframes?.opacity).toHaveLength(1)
+  })
+
+  it('refuses to keep nothing', () => {
+    // Deleting the segment is a different operation, and saying so is better
+    // than quietly doing it.
+    expect(() =>
+      keepSourceSpans(fourSeconds(), {
+        segmentId: 'clip-1',
+        spans: [],
+        newSegmentIds: [],
+      }),
+    ).toThrow(/remove it instead/)
+  })
+
+  it('refuses spans out of order, overlapping, or outside the range', () => {
+    const outOfOrder = () =>
+      keepSourceSpans(fourSeconds(), {
+        segmentId: 'clip-1',
+        spans: [
+          { startMicros: 3 * SECOND, endMicros: 4 * SECOND },
+          { startMicros: 1 * SECOND, endMicros: 2 * SECOND },
+        ],
+        newSegmentIds: ['x'],
+      })
+    expect(outOfOrder).toThrow(/in order/)
+
+    const past = () =>
+      keepSourceSpans(fourSeconds(), {
+        segmentId: 'clip-1',
+        spans: [{ startMicros: 1 * SECOND, endMicros: 9 * SECOND }],
+        newSegmentIds: [],
+      })
+    expect(past).toThrow(/outside the segment/)
+  })
+
+  it('refuses without enough ids for the pieces', () => {
+    expect(() =>
+      keepSourceSpans(fourSeconds(), {
+        segmentId: 'clip-1',
+        spans: [
+          { startMicros: 1 * SECOND, endMicros: 2 * SECOND },
+          { startMicros: 3 * SECOND, endMicros: 4 * SECOND },
+        ],
+        newSegmentIds: [],
+      }),
+    ).toThrow(/needs 1 new ids/)
+  })
+
+  it('refuses on text, which plays no source', () => {
+    const project = addSegment(projectWithSources(), {
+      trackId: MAIN_TEXT_TRACK_ID,
+      segment: textSegment('caption', 0, 2 * SECOND),
+    })
+
+    expect(() =>
+      keepSourceSpans(project, {
+        segmentId: 'caption',
+        spans: [{ startMicros: 0, endMicros: SECOND }],
+        newSegmentIds: [],
+      }),
+    ).toThrow(/Text has no source/)
   })
 })

@@ -21,14 +21,24 @@ import {
 import {
   draftFileName,
   isDraftError,
+  draftName,
   parseDraftText,
   serializeDraft,
 } from './timeline/draft'
 import { timelineDuration } from './timeline/operations'
 import {
   clearEverything,
+  forgetMedia,
+  loadAllMeasured,
   loadAllMedia,
+  saveMeasured,
+  UNTITLED,
+  adoptLegacyProject,
+  deleteProject,
+  listProjects,
   loadProject as loadSavedProject,
+  renameProject,
+  type ProjectSummary,
   requestDurableStorage,
   saveMedia,
   saveProject,
@@ -36,9 +46,27 @@ import {
 } from './timeline/persistence'
 import {
   clearSourceFiles,
+  forgetSourceFile,
   hasSourceFile,
+  getSourceFile,
   registerSourceFile,
 } from './timeline/sourceRegistry'
+import { captionSteps, segmentsUsing } from './assistant/captions'
+import {
+  readSpokenLanguage,
+  writeSpokenLanguage,
+} from './assistant/language'
+import { requestTranscript, type Transcript } from './assistant/transcript'
+import { shotBoundaries } from './assistant/shots'
+import { signalsFor } from './assistant/signals'
+import {
+  VISION_MAX_FRAMES,
+  VISION_SAMPLE_SECONDS,
+  requestVisuals,
+  type Visuals,
+} from './assistant/vision'
+import { loudSpans,
+  quietSpans, removedMicros } from './timeline/silence'
 import { useTimelineStore } from './timeline/store'
 import {
   BLEND_MODES,
@@ -58,6 +86,8 @@ import {
   isAnimated,
   propertyAt,
   segmentDuration,
+  MAIN_VIDEO_TRACK_ID,
+  emptyProject,
   segmentLabel,
   segmentRate,
   soundContent,
@@ -78,6 +108,16 @@ import {
   type TrackKind,
 } from './timeline/types'
 import Timeline, { type PeaksBySource } from './ui/Timeline'
+import Assistant from './ui/Assistant'
+import { readOpenProjectId, writeOpenProjectId } from './ui/openProject'
+import { mediaKeyFor } from './timeline/mediaKey'
+
+/** Which file each source is, for a map of restored media. */
+function keysFor(media: Map<string, File>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [sourceId, file] of media) out[sourceId] = mediaKeyFor(file)
+  return out
+}
 
 /** A gesture in progress. Nothing here has reached the undo history yet. */
 type ActiveDrag = {
@@ -105,6 +145,11 @@ const TRANSFORM_FIELDS: PropertyField[] = [
   { property: 'scale', label: 'scale', step: 0.05, min: 0.01 },
   { property: 'x', label: 'offset x', step: 1 },
   { property: 'y', label: 'offset y', step: 1 },
+  // Stepped by a quarter turn, because that is what almost every rotation is:
+  // footage that came out of a messaging app with its orientation metadata
+  // stripped, and needs putting back the right way up. Any angle can still be
+  // typed, and keyframed like every other property here.
+  { property: 'rotation', label: 'rotate', step: 90, min: -360, max: 360 },
   { property: 'opacity', label: 'opacity', step: 0.05, min: 0, max: 1 },
 ]
 
@@ -232,6 +277,51 @@ function DuplicateGlyph() {
   )
 }
 
+function EyeGlyph() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+      {/* An eye: what looking at the footage is. */}
+      <path
+        d="M1.5 8s2.5-4 6.5-4 6.5 4 6.5 4-2.5 4-6.5 4S1.5 8 1.5 8z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      <circle cx="8" cy="8" r="1.8" fill="currentColor" />
+    </svg>
+  )
+}
+
+function ScriptGlyph() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+      {/* Lines of text on a page: what a transcript is. */}
+      <path
+        d="M3.5 2h9v12h-9zM5.5 5h5M5.5 7.5h5M5.5 10h3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+function SilenceGlyph() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+      {/* A waveform with its middle flattened: the shape of what this does. */}
+      <path
+        d="M1 8h1.5M4 4.5v7M6 6.5v3M8 8h4M14 5.5v5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
 function TransitionGlyph() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
@@ -304,6 +394,28 @@ export default function App() {
   const [relinkTick, setRelinkTick] = useState(0)
   /** When the timeline was last written to storage, for the saved indicator. */
   const [savedAt, setSavedAt] = useState<number | null>(null)
+
+  /**
+   * Which piece of work is open, and what it is called.
+   *
+   * WHICH ONE is a preference about this browser, exactly like the theme: it
+   * says nothing about the work and must not travel in a draft. The NAME is
+   * part of the work, and goes in the draft beside the project - but not
+   * inside it, because nothing renders differently for being called anything.
+   */
+  /**
+   * Whether the picture shows the footage as it ARRIVED rather than as edited.
+   *
+   * A way of looking, not an edit: nothing about the project changes, and the
+   * timeline underneath goes on showing the cut. It is a toggle rather than two
+   * pictures side by side because the second one would mean decoding the source
+   * a second time, and a phone recording is expensive enough to decode once.
+   */
+  const [showOriginal, setShowOriginal] = useState(false)
+
+  const [projectId, setProjectId] = useState<string | null>(null)
+  const [projectName, setProjectName] = useState(UNTITLED)
+  const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [usage, setUsage] = useState<{
     usageBytes: number
     quotaBytes: number
@@ -319,6 +431,47 @@ export default function App() {
    * project, so they live here and never go near the store.
    */
   const [peaks, setPeaks] = useState<PeaksBySource>({})
+
+  /**
+   * What each source says, once somebody has asked.
+   *
+   * Kept here rather than in the store for the same reason the peaks are: it is
+   * measured from the media, not authored, so it is not part of the project and
+   * must never travel in a draft. Keyed by source, because a transcript belongs
+   * to the FILE - split a clip in two and both halves are covered by the one
+   * transcript, re-sliced.
+   */
+  /**
+   * What each FILE says, keyed by media rather than by source.
+   *
+   * A sourceId is minted per import, so the same file brought into a second
+   * project has a second one - and a transcript keyed by that would look lost
+   * the moment somebody switched projects. See `mediaKey.ts`.
+   */
+  const [transcripts, setTranscripts] = useState<Record<string, Transcript>>({})
+
+  /** Which file each source is, so the two keyings can be crossed. */
+  const [mediaKeys, setMediaKeys] = useState<Record<string, string>>({})
+  const [transcribing, setTranscribing] = useState(false)
+
+  /**
+   * What the transcriber should listen for. A preference about this browser, the
+   * same as the theme, so it is read from storage rather than from the project
+   * and never travels in a draft.
+   */
+  const [spokenLanguage, setSpokenLanguage] = useState(() =>
+    readSpokenLanguage(globalThis.localStorage),
+  )
+
+  /**
+   * What each source LOOKS like, once somebody has asked.
+   *
+   * Beside the transcripts and for the same reasons: derived from media rather
+   * than authored, so it is not part of the project and never travels in a
+   * draft. Keyed by source, because what was filmed belongs to the file.
+   */
+  const [visuals, setVisuals] = useState<Record<string, Visuals>>({})
+  const [watching, setWatching] = useState(false)
 
   const dragRef = useRef<ActiveDrag | null>(null)
   /** A scrub in progress: where it was grabbed, and from what position. */
@@ -389,25 +542,6 @@ export default function App() {
     zoomRef.current = pixelsPerSecond
   }, [pixelsPerSecond])
 
-  /**
-   * The worker renders whatever the project says, so any change republishes
-   * it - and then re-renders the current position, because the same moment on
-   * the timeline can show something different after a load, an edit or an undo.
-   * Without the seek nothing appears until the user happens to click.
-   */
-  useEffect(() => {
-    const player = playerRef.current
-    if (!player) return
-
-    player.setProject(displayProject)
-    if (playingRef.current) return
-
-    const timelineEnd = timelineDuration(displayProject)
-    if (timelineEnd === 0) return
-
-    const target = previewTargetRef.current ?? currentMicrosRef.current
-    player.seek(Math.min(Math.max(0, target), timelineEnd - 1))
-  }, [displayProject])
 
   /**
    * Brings back whatever was open last time.
@@ -421,11 +555,62 @@ export default function App() {
 
     async function restore() {
       try {
-        const [saved, media] = await Promise.all([
-          loadSavedProject(),
+        // Which project was open is a preference about this browser, so it is
+        // read from here rather than from the database.
+        let wanted = readOpenProjectId(globalThis.localStorage)
+
+        // A browser last used before projects had names has one project in the
+        // old single slot. It is somebody's work; it gets an id rather than
+        // being left where nothing will look for it again.
+        const adopted = await adoptLegacyProject(wanted ?? crypto.randomUUID())
+        if (adopted) wanted = adopted
+
+        const known = await listProjects()
+        if (cancelled) return
+        setProjects(known)
+
+        // Whatever was open, or the most recently saved, or nothing at all.
+        const openId =
+          (wanted && known.some((one) => one.id === wanted) ? wanted : null) ??
+          known[0]?.id ??
+          null
+
+        const [saved, media, measured] = await Promise.all([
+          openId ? loadSavedProject(openId) : Promise.resolve(null),
           loadAllMedia(),
+          loadAllMeasured(),
         ])
         if (cancelled) return
+
+        // An id exists from the first moment, so the first autosave has
+        // somewhere to go rather than inventing a second project.
+        const id = saved?.id ?? openId ?? crypto.randomUUID()
+        setProjectId(id)
+        setProjectName(saved?.name ?? UNTITLED)
+        writeOpenProjectId(id, globalThis.localStorage)
+
+
+        // What was worked out about the media last time. A transcript costs
+        // minutes and a description costs money, so losing them on a reload
+        // would have somebody pay for the same answer twice - and until they
+        // did, the assistant would be blind and would rightly refuse to cut.
+        const restoredScripts: Record<string, Transcript> = {}
+        const restoredVisuals: Record<string, Visuals> = {}
+        for (const [sourceId, value] of measured) {
+          const entry = value as { transcript?: Transcript; visuals?: Visuals }
+          if (entry?.transcript?.segments) {
+            restoredScripts[sourceId] = entry.transcript
+          }
+          if (entry?.visuals?.shots) restoredVisuals[sourceId] = entry.visuals
+        }
+        if (Object.keys(restoredScripts).length > 0) {
+          setTranscripts(restoredScripts)
+        }
+        if (Object.keys(restoredVisuals).length > 0) {
+          setVisuals(restoredVisuals)
+        }
+
+        setMediaKeys(keysFor(media))
 
         if (saved) {
           for (const [sourceId, file] of media) {
@@ -474,10 +659,23 @@ export default function App() {
   useEffect(() => {
     if (!restored) return
 
+    // No id means the restore has not finished working out which project this
+    // is. Saving now would write a second one beside the one being opened.
+    if (!projectId) return
+
     const timer = setTimeout(() => {
-      void saveProject(project)
-        .then(() => {
-          setSavedAt(Date.now())
+      void saveProject(projectId, projectName, project)
+        .then((at) => {
+          setSavedAt(at)
+          setProjects((current) =>
+            current.some((one) => one.id === projectId)
+              ? current.map((one) =>
+                  one.id === projectId
+                    ? { ...one, name: projectName, savedAt: at }
+                    : one,
+                )
+              : [{ id: projectId, name: projectName, savedAt: at }, ...current],
+          )
           return storageUsage()
         })
         .then((next) => setUsage(next))
@@ -485,7 +683,7 @@ export default function App() {
     }, 400)
 
     return () => clearTimeout(timer)
-  }, [project, restored])
+  }, [project, restored, projectId, projectName])
 
   /**
    * Measures the waveform of any source that carries sound and has not been
@@ -905,7 +1103,9 @@ export default function App() {
   function saveDraft() {
     const project = useTimelineStore.getState().project
     const url = URL.createObjectURL(
-      new Blob([serializeDraft(project)], { type: 'application/json' }),
+      new Blob([serializeDraft(project, projectName)], {
+        type: 'application/json',
+      }),
     )
 
     const link = document.createElement('a')
@@ -926,13 +1126,26 @@ export default function App() {
     setExportPercent(null)
 
     try {
-      const project = parseDraftText(await file.text())
+      const text = await file.text()
+      const project = parseDraftText(text)
+
+      // Opened as its OWN project rather than over the top of the current one:
+      // a file off somebody's disk is a separate piece of work, and writing it
+      // into the open slot would quietly replace whatever was there.
+      const id = crypto.randomUUID()
+      const named =
+        draftName(JSON.parse(text) as unknown) ??
+        file.name.replace(/\.draft\.json$|\.json$/i, '') ??
+        UNTITLED
 
       // A draft carries no media, so nothing that was open still applies.
       clearSourceFiles()
       useTimelineStore.getState().openProject(project)
       setSelectedSegmentId(null)
       setCurrentMicros(0)
+      setProjectId(id)
+      setProjectName(named)
+      writeOpenProjectId(id, globalThis.localStorage)
       setRelinkTick((tick) => tick + 1)
       exportNameRef.current =
         Object.values(project.sources)[0]?.name ?? 'timeline'
@@ -1040,6 +1253,69 @@ export default function App() {
    * a video row, something with only sound goes on an audio row. Text on a row
    * of its own does not push either of them along.
    */
+  /** How many segments are playing a source, which is what removing it costs. */
+  function clipsUsing(sourceId: string): number {
+    let count = 0
+    for (const track of displayProject.tracks) {
+      for (const segment of track.segments) {
+        const content = segment.content
+        if (content.kind !== 'text' && content.sourceId === sourceId) count += 1
+      }
+    }
+    return count
+  }
+
+  /**
+   * Says what will go, on the button itself. Removing a file takes its clips
+   * with it, and a count is the difference between a safe click and a surprise -
+   * there is no dialog here, undo is the safety net.
+   */
+  function removeSourceTitle(sourceId: string, name: string): string {
+    const clips = clipsUsing(sourceId)
+    if (clips === 0) return `Remove ${name}`
+    return `Remove ${name} and the ${clips} clip${clips === 1 ? '' : 's'} using it`
+  }
+
+  /**
+   * Forgets a file: the project reference, the clips playing it, the File held
+   * for the decoder, and the copy kept for the next visit.
+   *
+   * The store change is one undo step. The two forgettings are NOT undone by it
+   * - a File cannot be resurrected from a patch - so undo brings the timeline
+   * back with that source offline, and the relink panel is how it comes back.
+   * That is the same state a reopened draft starts in.
+   */
+  function forgetSource(sourceId: string) {
+    const store = useTimelineStore.getState()
+    const going = new Set(
+      store.project.tracks.flatMap((track) =>
+        track.segments
+          .filter((segment) => {
+            const content = segment.content
+            return content.kind !== 'text' && content.sourceId === sourceId
+          })
+          .map((segment) => segment.id),
+      ),
+    )
+
+    store.removeSource(sourceId)
+
+    // The inspector must not go on describing a clip that is gone.
+    if (selectedSegmentId !== null && going.has(selectedSegmentId)) {
+      setSelectedSegmentId(null)
+    }
+
+    forgetSourceFile(sourceId)
+    // What was MEASURED is deliberately left. It is keyed by the file rather
+    // than by this import, so another project may still be using it - and it
+    // cost minutes of somebody's machine or real money to work out. A few
+    // kilobytes outliving their last user is much the cheaper mistake.
+    void forgetMedia(sourceId).catch(() => {
+      // It is already out of the project; a copy left behind is not worth
+      // interrupting an edit over.
+    })
+  }
+
   function appendClip(sourceId: string) {
     const store = useTimelineStore.getState()
     const source = store.project.sources[sourceId]
@@ -1085,11 +1361,20 @@ export default function App() {
 
     const sourceId = crypto.randomUUID()
     registerSourceFile(sourceId, file)
+    setMediaKeys((current) => ({ ...current, [sourceId]: mediaKeyFor(file) }))
     // Kept so the next visit needs no re-picking. A failure here costs the
     // convenience, not the edit, so it is warned about rather than surfaced.
-    void saveMedia(sourceId, file).catch((err) =>
-      console.warn('[persistence] could not keep the media:', err),
-    )
+    void saveMedia(sourceId, file).catch((err: unknown) => {
+      // Said out loud rather than only logged. A phone recording can be larger
+      // than the whole storage quota, and the failure is silent until the next
+      // visit - when the timeline comes back with nothing to decode from and
+      // the reason is hours in the past.
+      console.warn('[persistence] could not keep the media:', err)
+      setError(
+        `${file.name} is open, but too large to keep in this browser. It will` +
+          ' have to be chosen again next time.',
+      )
+    })
 
     try {
       const geometry = await playerRef.current!.probeSource(sourceId, file)
@@ -1115,6 +1400,7 @@ export default function App() {
     }
   }
 
+  /** How long the EDIT is. The timeline always shows this, whatever is pictured. */
   const duration = timelineDuration(displayProject)
   const hasTimeline = duration > 0
   const exportSettings = exportSettingsOf(displayProject)
@@ -1144,6 +1430,522 @@ export default function App() {
   const selectedHasSound = selectedSegment
     ? soundContent(selectedSegment) !== undefined
     : false
+
+  const selectedSound = selectedSegment
+    ? soundContent(selectedSegment)
+    : undefined
+  /** What was measured about the file a source plays, if anything was. */
+  function measuredFor<T>(
+    held: Record<string, T>,
+    sourceId: string | undefined,
+  ): T | undefined {
+    const key = sourceId ? mediaKeys[sourceId] : undefined
+    return key ? held[key] : undefined
+  }
+
+  const selectedTranscript = measuredFor(transcripts, selectedSound?.sourceId)
+
+  /**
+   * The footage before anybody touched it: one source, whole, at the head.
+   *
+   * Built as a PROJECT rather than as a special case in the player, so it goes
+   * through the one render function like everything else - a second way to draw
+   * a picture is the thing this codebase spends its life avoiding.
+   *
+   * The composition is kept, so the two views are the same shape and the
+   * difference between them is only the editing.
+   */
+  const originalProject = useMemo(() => {
+    const chosen =
+      (selectedSound && displayProject.sources[selectedSound.sourceId]) ??
+      Object.values(displayProject.sources)[0]
+    if (!chosen) return null
+
+    const before = emptyProject()
+    before.composition = { ...displayProject.composition }
+    before.sources = { [chosen.id]: chosen }
+
+    const video = before.tracks.find((track) => track.id === MAIN_VIDEO_TRACK_ID)
+    video?.segments.push({
+      id: 'original',
+      timelineStartMicros: 0,
+      content: {
+        kind: 'video',
+        sourceId: chosen.id,
+        sourceInMicros: 0,
+        sourceOutMicros: chosen.durationMicros,
+      },
+    })
+    return before
+  }, [displayProject.sources, displayProject.composition, selectedSound])
+
+  /** Which project the PICTURE is showing. The timeline always shows the edit. */
+  const picturedProject: Project =
+    showOriginal && originalProject !== null ? originalProject : displayProject
+
+  const previewDuration = timelineDuration(picturedProject)
+
+  /**
+   * The worker renders whatever the project says, so any change republishes
+   * it - and then re-renders the current position, because the same moment on
+   * the timeline can show something different after a load, an edit or an undo.
+   * Without the seek nothing appears until the user happens to click.
+   */
+  useEffect(() => {
+    const player = playerRef.current
+    if (!player) return
+
+    player.setProject(picturedProject)
+    if (playingRef.current) return
+
+    const timelineEnd = timelineDuration(picturedProject)
+    if (timelineEnd === 0) return
+
+    const target = previewTargetRef.current ?? currentMicrosRef.current
+    player.seek(Math.min(Math.max(0, target), timelineEnd - 1))
+  }, [picturedProject])
+
+  /**
+   * Where nobody is speaking, for every source that has been transcribed.
+   *
+   * Sent to the assistant beside the words, because a cut boundary taken from a
+   * transcript lands where a word BEGINS - a moment before the sound and a
+   * moment after the breath before it - and cutting exactly there clips both.
+   * Measured from the peaks, which are already there for the waveform.
+   *
+   * Only for transcribed sources: without the words there is nothing to place
+   * against, and every other file's pauses would be paid for in every request.
+   */
+  /**
+   * What the assistant is told, keyed by SOURCE.
+   *
+   * The measured things are held by file, because the same footage in two
+   * projects is the same footage. The agent speaks source ids, because that is
+   * what the timeline is made of. This is the one place the two are crossed.
+   */
+  const knowledgeForAssistant = useMemo(() => {
+    const scripts: Record<string, Transcript> = {}
+    const seen: Record<string, Visuals> = {}
+    const pauses: Record<
+      string,
+      { startMicros: number; endMicros: number }[]
+    > = {}
+    const signals: Record<
+      string,
+      { clarity?: number; loudness?: number; repeatOf?: number }[]
+    > = {}
+
+    for (const sourceId of Object.keys(displayProject.sources)) {
+      const key = mediaKeys[sourceId]
+      if (!key) continue
+
+      const transcript = transcripts[key]
+      const visual = visuals[key]
+      if (transcript) scripts[sourceId] = transcript
+      if (visual) seen[sourceId] = visual
+
+      // How clearly, how loudly, and whether it had already been said. All
+      // arithmetic, and all of it invisible in the words themselves.
+      if (transcript) {
+        const measured = peaks[sourceId]
+        signals[sourceId] = signalsFor(
+          transcript.segments,
+          measured && measured.peaks.length > 0 ? measured : undefined,
+        )
+      }
+
+      // Pauses only where there are words to place against them; every other
+      // file's would be paid for in every request for nothing.
+      const measured = peaks[sourceId]
+      const source = displayProject.sources[sourceId]
+      if (!transcript || !measured || measured.peaks.length === 0 || !source) {
+        continue
+      }
+
+      pauses[sourceId] = quietSpans(
+        measured.peaks,
+        measured.bucketsPerSecond,
+        { startMicros: 0, endMicros: source.durationMicros },
+      )
+    }
+
+    return { scripts, visuals: seen, pauses, signals }
+  }, [transcripts, visuals, mediaKeys, peaks, displayProject.sources])
+
+  /**
+   * Whether there is anything to transcribe.
+   *
+   * `soundContent` says the segment is the KIND that can carry sound, which is
+   * not the same as the file having any: a video shot with the microphone off
+   * is still a video segment. The waveform is the honest answer, and it has
+   * already been measured - no peaks means either silence or a measurement
+   * still in flight, and neither is worth sending to a transcriber.
+   */
+  /**
+   * Whether there is a picture to look at.
+   *
+   * The segment's kind is the honest answer here, unlike with sound: a video
+   * segment always has frames, where a video file may well have no audio. A
+   * source stored with no size is a piece of music, and has no picture at all.
+   */
+  const selectedCanWatch =
+    selectedSegment?.content.kind === 'video' &&
+    (displayProject.sources[selectedSegment.content.sourceId]?.width ?? 0) > 0
+
+  const visualsForSelection =
+    selectedSegment?.content.kind === 'video'
+      ? measuredFor(visuals, selectedSegment.content.sourceId)
+      : undefined
+
+  const selectedCanTranscribe = selectedSound
+    ? (peaks[selectedSound.sourceId]?.peaks.length ?? 0) > 0
+    : false
+
+  /**
+   * Asks what the selection says.
+   *
+   * Two steps, and the first is the reason this is not simply a fetch: the audio
+   * is decoded in the worker, by WebCodecs, exactly as it is for the preview and
+   * the export. What goes to the transcriber is plain PCM, so no part of this
+   * reaches for a second decoder.
+   */
+  async function transcribeSelection() {
+    const player = playerRef.current
+    if (!player || !selectedSound || transcribing) return
+
+    const sourceId = selectedSound.sourceId
+    setTranscribing(true)
+    setError(null)
+
+    try {
+      const audio = await player.sourceAudioForTranscription(sourceId)
+      const transcript = await requestTranscript(audio.samples, audio.sampleRate, {
+        ...(spokenLanguage ? { language: spokenLanguage } : {}),
+      })
+      const key = mediaKeys[sourceId] ?? sourceId
+      setTranscripts((current) => ({ ...current, [key]: transcript }))
+      void rememberMeasured(key, { transcript })
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setTranscribing(false)
+    }
+  }
+
+  /**
+   * Writes the open project before moving off it.
+   *
+   * The autosave is debounced, so a project edited and then left within that
+   * window has never been written - and switching away would lose it. An EMPTY
+   * one is deliberately not kept: an untouched editor is not work, and saving
+   * it would put a blank project in the list every time somebody pressed New,
+   * as well as making a fresh browser look like it already had something in it.
+   */
+  async function keepProject(id: string | null, name: string, open: Project) {
+    if (!id) return
+
+    const hasAnything =
+      Object.keys(open.sources).length > 0 ||
+      open.tracks.some((track) => track.segments.length > 0)
+    if (!hasAnything) return
+
+    const at = await saveProject(id, name, open)
+    setProjects((current) =>
+      current.some((one) => one.id === id)
+        ? current.map((one) =>
+            one.id === id ? { ...one, name, savedAt: at } : one,
+          )
+        : [{ id, name, savedAt: at }, ...current],
+    )
+  }
+
+  /**
+   * Opens another piece of work.
+   *
+   * The undo history is cleared, for the same reason opening a draft clears it:
+   * undoing across the switch would walk into a timeline nobody has open. The
+   * transcripts and descriptions are NOT cleared - they are keyed by source, so
+   * a file used in two projects keeps what was worked out about it once.
+   */
+  async function openProjectById(id: string) {
+    if (id === projectId) return
+
+    // Captured before anything is awaited: the state these describe is replaced
+    // below, and reading them afterwards would save the incoming project under
+    // the outgoing one's id.
+    const outgoing = {
+      id: projectId,
+      name: projectName,
+      project: useTimelineStore.getState().project,
+    }
+
+    const saved = await loadSavedProject(id)
+    if (!saved) return
+
+    await keepProject(outgoing.id, outgoing.name, outgoing.project)
+
+    const media = await loadAllMedia()
+    for (const [sourceId, file] of media) registerSourceFile(sourceId, file)
+    // The other project's imports are new source ids to this session, and
+    // without their file identities nothing measured would be found for them.
+    setMediaKeys(keysFor(media))
+
+    // The database FIRST, then whatever this session already has open. A file
+    // that could not be stored - a phone recording can be larger than the whole
+    // quota - is still perfectly usable until the tab is closed, and refusing
+    // to hand it over would strand a project that was working a moment ago.
+    await Promise.all(
+      Object.keys(saved.project.sources).map((sourceId) => {
+        const file = media.get(sourceId) ?? getSourceFile(sourceId)
+        if (!file) return undefined
+        return playerRef.current?.probeSource(sourceId, file).catch(() => undefined)
+      }),
+    )
+
+    setSelectedSegmentId(null)
+    useTimelineStore.getState().openProject(saved.project)
+    setProjectId(saved.id)
+    setProjectName(saved.name)
+    setSavedAt(saved.savedAt)
+    writeOpenProjectId(saved.id, globalThis.localStorage)
+    setRelinkTick((tick) => tick + 1)
+    exportNameRef.current =
+      Object.values(saved.project.sources)[0]?.name ?? saved.name
+  }
+
+  /**
+   * Starts a new piece of work.
+   *
+   * Saved immediately rather than on the first edit, so it appears in the list
+   * at once - a new project that vanished until it was touched would look like
+   * the button had not worked.
+   */
+  async function createProject() {
+    // The switch happens SYNCHRONOUSLY, before anything is awaited. Writing the
+    // outgoing project first would leave a window in which the new project is
+    // notionally open but the name field still belongs to the old one - and a
+    // name typed into it would be wiped when this resumed.
+    const outgoing = {
+      id: projectId,
+      name: projectName,
+      project: useTimelineStore.getState().project,
+    }
+
+    const id = crypto.randomUUID()
+    const fresh = emptyProject()
+
+    setSelectedSegmentId(null)
+    useTimelineStore.getState().openProject(fresh)
+    setProjectId(id)
+    setProjectName(UNTITLED)
+    writeOpenProjectId(id, globalThis.localStorage)
+
+    await keepProject(outgoing.id, outgoing.name, outgoing.project)
+
+    const at = await saveProject(id, UNTITLED, fresh)
+    setSavedAt(at)
+    setProjects((current) =>
+      current.some((one) => one.id === id)
+        ? current
+        : [{ id, name: UNTITLED, savedAt: at }, ...current],
+    )
+  }
+
+  /**
+   * Throws a project away.
+   *
+   * The media is left alone deliberately - a file can be in more than one
+   * project and there is no way to know from here whether it is. Deleting the
+   * one that is open moves to another rather than leaving nothing open.
+   */
+  async function removeProject(id: string) {
+    await deleteProject(id)
+    const left = projects.filter((one) => one.id !== id)
+    setProjects(left)
+
+    if (id !== projectId) return
+    if (left[0]) {
+      await openProjectById(left[0].id)
+    } else {
+      await createProject()
+    }
+  }
+
+  /**
+   * Keeps what was worked out about a source, without losing what else is known
+   * about it.
+   *
+   * Read-modify-write rather than a plain put: transcribing and looking are
+   * separate acts on the same file, and whichever happened second must not
+   * erase the first.
+   */
+  async function rememberMeasured(
+    sourceId: string,
+    entry: { transcript?: Transcript; visuals?: Visuals },
+  ) {
+    try {
+      const existing = (await loadAllMeasured()).get(sourceId) as
+        | { transcript?: Transcript; visuals?: Visuals }
+        | undefined
+      await saveMeasured(sourceId, { ...existing, ...entry })
+    } catch {
+      // Not being able to remember it is not a reason to lose it from this
+      // session, where it is already in state and already useful.
+    }
+  }
+
+  /**
+   * Looks at the selection, and asks what is in it.
+   *
+   * Three steps, and the middle one deliberately has no model in it: the worker
+   * samples frames, `shotBoundaries` works out where the picture changed from
+   * the numbers alone, and only the question of what is IN each shot is asked of
+   * Claude. Where a cut is has one right answer and does not need paying for.
+   *
+   * This is the one thing in the application that sends footage anywhere.
+   */
+  async function watchSelection() {
+    const player = playerRef.current
+    if (!player || !selectedSegment || watching) return
+
+    const content = selectedSegment.content
+    if (content.kind !== 'video') return
+
+    const sourceId = content.sourceId
+    setWatching(true)
+    setError(null)
+
+    try {
+      const sampled = await player.sampleSourceFrames(
+        sourceId,
+        VISION_SAMPLE_SECONDS * 1_000_000,
+        VISION_MAX_FRAMES,
+      )
+      if (sampled.error) throw new Error(sampled.error)
+      if (sampled.frames.length === 0) {
+        throw new Error('There is no picture in this clip to look at.')
+      }
+
+      const source = displayProject.sources[sourceId]
+      const boundaries = shotBoundaries(
+        sampled.frames.map((frame) => ({
+          atMicros: frame.atMicros,
+          grid: frame.grid,
+        })),
+      )
+
+      // What was actually looked at, which is not the whole file once the frame
+      // cap bites. An agent told nothing would read the description as covering
+      // all of it.
+      const last = sampled.frames[sampled.frames.length - 1]!
+      const lookedAtMicros = last.atMicros + VISION_SAMPLE_SECONDS * 1_000_000
+      const wholeFile =
+        !source || lookedAtMicros >= source.durationMicros
+
+      const seen = await requestVisuals(
+        sampled.frames,
+        boundaries,
+        Math.min(lookedAtMicros, source?.durationMicros ?? lookedAtMicros),
+      )
+
+      const kept = wholeFile
+        ? seen
+        : { ...seen, truncatedAfterSeconds: lookedAtMicros / 1_000_000 }
+      const key = mediaKeys[sourceId] ?? sourceId
+      setVisuals((current) => ({ ...current, [key]: kept }))
+      void rememberMeasured(key, { visuals: kept })
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setWatching(false)
+    }
+  }
+
+  /**
+   * Lays the transcript onto the text row as captions.
+   *
+   * Every segment playing the source is captioned, each through its own clock,
+   * so a split or sped-up clip comes out right. The whole pass is ONE undo step:
+   * captioning an interview is one decision, and taking it back a line at a time
+   * would be unusable.
+   */
+  function addCaptionsFromTranscript() {
+    if (!selectedSound) return
+
+    const transcript = measuredFor(transcripts, selectedSound.sourceId)
+    const textTrack = displayProject.tracks.find(
+      (track) => track.kind === 'text',
+    )
+    if (!transcript || !textTrack) return
+
+    const steps = segmentsUsing(displayProject, selectedSound.sourceId).flatMap(
+      (segment) =>
+        captionSteps(
+          segment,
+          transcript,
+          textTrack,
+          displayProject.composition,
+          () => crypto.randomUUID(),
+        ),
+    )
+
+    if (steps.length === 0) {
+      setError('None of what was said falls inside the clips on the timeline.')
+      return
+    }
+
+    useTimelineStore.getState().applyPlan(steps)
+  }
+
+  /**
+   * What trimming silence out of the selection would do, or null if it would do
+   * nothing.
+   *
+   * Worked out here rather than in the store because it needs the WAVEFORM, and
+   * the waveform is measured from the media rather than being part of the
+   * project - the same split the source registry already makes for the files.
+   */
+  const silenceTrim = useMemo(() => {
+    if (!selectedSegment || !selectedSegmentId) return null
+
+    const sound = soundContent(selectedSegment)
+    if (!sound) return null
+
+    const measured = peaks[sound.sourceId]
+    if (!measured || measured.peaks.length === 0) return null
+
+    const range = {
+      startMicros: sound.sourceInMicros,
+      endMicros: sound.sourceOutMicros,
+    }
+    const spans = loudSpans(measured.peaks, measured.bucketsPerSecond, range)
+
+    // Nothing to keep means the whole selection is quiet. Cutting it all would
+    // be a delete, and a trim button that sometimes deletes things is worse
+    // than one that declines.
+    if (spans.length === 0) return null
+
+    const removed = removedMicros(spans, range)
+    if (removed <= 0) return null
+
+    return { spans, removed }
+    // Memoised, and it matters: the playhead re-renders this component sixty
+    // times a second while playing, and this walks every peak of the source.
+    // On a three minute recording that was ten thousand comparisons a frame to
+    // answer a question whose answer had not changed.
+  }, [selectedSegment, selectedSegmentId, peaks])
+
+  function trimSilence() {
+    if (!selectedSegmentId || !silenceTrim) return
+
+    useTimelineStore.getState().keepSourceSpans({
+      segmentId: selectedSegmentId,
+      spans: silenceTrim.spans,
+      newSegmentIds: silenceTrim.spans
+        .slice(1)
+        .map(() => crypto.randomUUID()),
+    })
+  }
 
   /**
    * Whether the selection has a cut before it worth blending across: it must
@@ -1255,8 +2057,24 @@ export default function App() {
           Pause
         </button>{' '}
         <span data-testid="time">
-          {formatMicros(currentMicros)} / {formatMicros(duration)}
+          {formatMicros(currentMicros)} / {formatMicros(previewDuration)}
         </span>
+        {originalProject !== null && (
+          <button
+            type="button"
+            data-testid="show-original"
+            className={showOriginal ? 'compare is-original' : 'compare'}
+            aria-pressed={showOriginal}
+            title={
+              showOriginal
+                ? 'Showing the footage as it arrived. Click for the edit.'
+                : 'Showing your edit. Click for the footage as it arrived.'
+            }
+            onClick={() => setShowOriginal((on) => !on)}
+          >
+            {showOriginal ? 'Before' : 'After'}
+          </button>
+        )}
         </div>
 
         <div className="zoom-controls">
@@ -1307,6 +2125,62 @@ export default function App() {
       </header>
 
       <aside className="sidebar">
+        <section className="panel" data-testid="project-panel">
+          <h2 className="panel-title">Project</h2>
+          <input
+            type="text"
+            className="project-name"
+            data-testid="project-name"
+            value={projectName}
+            aria-label="Project name"
+            onChange={(event) => setProjectName(event.target.value)}
+            onBlur={() => {
+              const named = projectName.trim() || UNTITLED
+              setProjectName(named)
+              if (projectId) void renameProject(projectId, named)
+            }}
+          />
+          <button
+            type="button"
+            data-testid="project-new"
+            className="project-new"
+            onClick={() => void createProject()}
+          >
+            New project
+          </button>
+          {projects.length > 1 && (
+            <ul className="project-list" data-testid="project-list">
+              {projects.map((one) => (
+                <li
+                  key={one.id}
+                  data-testid="project-item"
+                  data-project-id={one.id}
+                  className={one.id === projectId ? 'is-current' : undefined}
+                >
+                  <button
+                    type="button"
+                    className="project-open"
+                    data-testid="project-open"
+                    disabled={one.id === projectId}
+                    onClick={() => void openProjectById(one.id)}
+                  >
+                    {one.id === projectId ? projectName : one.name}
+                  </button>
+                  <button
+                    type="button"
+                    className="project-remove"
+                    data-testid="project-remove"
+                    title={`Delete ${one.name}`}
+                    onClick={() => void removeProject(one.id)}
+                  >
+                    &times;
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
         <section className="panel">
           <h2 className="panel-title">Media</h2>
           <input
@@ -1320,6 +2194,17 @@ export default function App() {
             <ul className="media-list" data-testid="media-list">
               {sources.map((source) => (
                 <li key={source.id} data-testid="media-item">
+                  <button
+                    type="button"
+                    className="media-remove"
+                    title={removeSourceTitle(source.id, source.name)}
+                    aria-label={removeSourceTitle(source.id, source.name)}
+                    data-testid="remove-source"
+                    data-source-id={source.id}
+                    onClick={() => forgetSource(source.id)}
+                  >
+                    &times;
+                  </button>
                   <button
                     type="button"
                     className="media-tile"
@@ -2376,17 +3261,65 @@ export default function App() {
         </div>
       </aside>
 
+      <Assistant
+        playheadMicrosRef={currentMicrosRef}
+        selectedSegmentId={selectedSegmentId}
+        scripts={knowledgeForAssistant.scripts}
+        pauses={knowledgeForAssistant.pauses}
+        signals={knowledgeForAssistant.signals}
+        visuals={knowledgeForAssistant.visuals}
+        script={
+          selectedTranscript && selectedSound
+            ? {
+                name:
+                  displayProject.sources[selectedSound.sourceId]?.name ??
+                  'this clip',
+                segments: selectedTranscript.segments,
+                ...(selectedTranscript.device
+                  ? { device: selectedTranscript.device }
+                  : {}),
+              }
+            : undefined
+        }
+        language={
+          selectedCanTranscribe
+            ? {
+                code: spokenLanguage,
+                busy: transcribing,
+                onChange: (code) => {
+                  setSpokenLanguage(code)
+                  writeSpokenLanguage(code, globalThis.localStorage)
+                },
+              }
+            : undefined
+        }
+      />
 
       <main className="stage">
         <div className="stage-status">
           {exportPercent !== null && (
             <p className="status status-busy">Exporting: {exportPercent}%</p>
           )}
-          {error !== null && <p className="status status-error">Error: {error}</p>}
+          {error !== null && (
+            <p className="status status-error" data-testid="stage-error">
+              Error: {error}
+            </p>
+          )}
           {hasTimeline && (
-            <p className="status">
+            <p className="status" data-testid="stage-length">
               Composition {displayProject.composition.width} x{' '}
-              {displayProject.composition.height}
+              {displayProject.composition.height} &middot;{' '}
+              {formatMicros(duration)}
+              {originalProject !== null &&
+                timelineDuration(originalProject) !== duration && (
+                  <span className="status-compare" data-testid="stage-compare">
+                    {' '}
+                    &middot; {formatMicros(
+                      timelineDuration(originalProject) - duration,
+                    )}{' '}
+                    shorter than the original
+                  </span>
+                )}
             </p>
           )}
         </div>
@@ -2446,6 +3379,74 @@ export default function App() {
           >
             <DuplicateGlyph />
             Duplicate
+          </button>
+          <button
+            type="button"
+            data-testid="verb-trim-silence"
+            title={
+              silenceTrim
+                ? `Cut ${(silenceTrim.removed / 1_000_000).toFixed(2)}s of silence out of this clip`
+                : 'No silence worth cutting in this clip'
+            }
+            onClick={trimSilence}
+            disabled={silenceTrim === null}
+          >
+            <SilenceGlyph />
+            Trim silence
+          </button>
+          <button
+            type="button"
+            data-testid="verb-transcribe"
+            title={
+              selectedTranscript
+                ? 'Listen again - try a different spoken language if it came back wrong'
+                : selectedCanTranscribe
+                  ? 'Work out what is said in this clip. Runs locally and takes a while.'
+                  : 'There is no sound in this clip to transcribe'
+            }
+            onClick={() => void transcribeSelection()}
+            disabled={!selectedCanTranscribe || transcribing}
+          >
+            <ScriptGlyph />
+            {transcribing
+              ? 'Listening...'
+              : selectedTranscript
+                ? 'Transcribe again'
+                : 'Transcribe'}
+          </button>
+          <button
+            type="button"
+            data-testid="verb-watch"
+            title={
+              !selectedCanWatch
+                ? 'There is no picture in this selection to look at'
+                : visualsForSelection
+                  ? 'Look again'
+                  : 'Look at the footage. THIS SENDS FRAMES OF YOUR VIDEO TO ANTHROPIC.'
+            }
+            onClick={() => void watchSelection()}
+            disabled={!selectedCanWatch || watching}
+          >
+            <EyeGlyph />
+            {watching
+              ? 'Looking...'
+              : visualsForSelection
+                ? 'Watch again'
+                : 'Watch'}
+          </button>
+          <button
+            type="button"
+            data-testid="verb-captions"
+            title={
+              selectedTranscript
+                ? 'Lay what is said onto the text row as captions'
+                : 'Transcribe the clip first'
+            }
+            onClick={addCaptionsFromTranscript}
+            disabled={!selectedTranscript}
+          >
+            <TextGlyph />
+            Captions
           </button>
           <button
             type="button"

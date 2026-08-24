@@ -139,17 +139,18 @@ input[type='color'] {
 
 /*
  * Layout: the project on the left, the picture in the middle, whatever is
- * selected on the right, and the timeline docked along the bottom.
+ * selected on the right, the assistant beyond that, and the timeline docked
+ * along the bottom.
  *
  * The split matters more than it looks. Every control used to live in one
  * column, so changing the clip you had just clicked meant scrolling past the
- * media list, the export settings and the row list to reach it. Scope is now
- * the thing that decides which side a panel is on: left is the project, right
- * is the selection.
+ * media list, the export settings and the row list to reach it. Scope is what
+ * decides which side a panel is on: left is the project, right is the
+ * selection, and the fourth column is a conversation about either.
  */
 .app {
   display: grid;
-  grid-template-columns: 218px minmax(0, 1fr) 282px;
+  grid-template-columns: 218px minmax(0, 1fr) 282px 300px;
   /* Four bands: the transport, the work, the verbs for what is selected, and
      the timeline. The verbs get their own row rather than a corner of one of
      the columns, because they act on the selection and the selection is not
@@ -158,19 +159,31 @@ input[type='color'] {
   height: 100vh;
 }
 
-/* Narrow windows drop the inspector under the picture rather than squeezing
-   all three columns until none of them is usable. */
-@media (max-width: 1100px) {
+/* Narrow windows drop the inspector and the assistant under the picture rather
+   than squeezing all four columns until none of them is usable.
+ *
+ * They share ONE band rather than taking a row each. Two stacked 240px panels
+ * plus the verbs plus the timeline leave a short window with no picture at all,
+ * which is the one thing the layout may never do - `tests/layout.spec.ts`
+ * checks exactly that. */
+@media (max-width: 1200px) {
   .app {
     grid-template-columns: 218px minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr) auto auto auto;
   }
 
   .inspector {
-    grid-column: 2;
+    grid-column: 1;
     grid-row: 3;
     max-height: 240px;
     border-left: none;
+    border-top: 1px solid var(--line);
+  }
+
+  .assistant {
+    grid-column: 2;
+    grid-row: 3;
+    max-height: 240px;
     border-top: 1px solid var(--line);
   }
 
@@ -256,6 +269,205 @@ input[type='color'] {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 7px;
+}
+
+/*
+ * The transcript, in the assistant column: something to READ while asking for a
+ * cut, so it is given real height and its own scroll rather than being squeezed
+ * above the conversation.
+ */
+/*
+ * What the transcriber should listen for. One row, above the script it governs -
+ * it is the only setting in this column, and it is here because the script is.
+ */
+.assistant-language {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.assistant-language select {
+  flex: 0 1 auto;
+  min-width: 0;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.assistant-script {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 45%;
+  padding: 7px 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+}
+
+.assistant-script h3 {
+  margin: 0 0 5px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.script-source {
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* The transcript, as lines with the moment each was said. */
+.script-lines {
+  margin: 0;
+  padding: 0 0 0 2px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.45;
+  list-style: none;
+}
+
+.script-lines li {
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  gap: 4px;
+  padding: 3px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.script-lines li:first-child {
+  border-top: 0;
+}
+
+.script-at {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+/*
+ * The list item is the positioning context for the remove button, which sits
+ * over the tile's corner. It cannot be inside the tile: the tile is itself a
+ * button, and a button inside a button is not a thing.
+ */
+/*
+ * The project panel: what this piece of work is, at the top of the column that
+ * says what the project is.
+ */
+/*
+ * Before and after. A way of LOOKING, so it sits with the transport rather than
+ * with the verbs: nothing about the project changes when it is pressed.
+ */
+.compare {
+  margin-left: 8px;
+  min-width: 62px;
+}
+
+.compare.is-original {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* How much shorter the edit is, next to what it is. */
+.status-compare {
+  color: var(--text-dim);
+}
+
+.project-name {
+  width: 100%;
+  padding: 5px 7px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+}
+
+.project-new {
+  width: 100%;
+  margin-top: 6px;
+}
+
+.project-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-list li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px;
+  align-items: center;
+  border-top: 1px solid var(--line-soft);
+}
+
+.project-list li:first-child {
+  border-top: 0;
+}
+
+.project-open {
+  overflow: hidden;
+  padding: 5px 4px;
+  font-size: 11px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: 0;
+}
+
+/* The open one is not a link to somewhere else, so it does not look like one. */
+.project-list li.is-current .project-open {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.project-remove {
+  padding: 2px 6px;
+  color: var(--text-dim);
+  background: none;
+  border: 0;
+}
+
+.project-remove:hover {
+  color: var(--text);
+}
+
+.media-list li {
+  position: relative;
+}
+
+.media-remove {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  z-index: 1;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--clip-text);
+  /* Over a picture band rather than a panel, so it carries its own ground. */
+  background: var(--bg-input);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  opacity: 0.75;
+}
+
+.media-remove:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  opacity: 1;
 }
 
 .media-tile {
@@ -693,6 +905,136 @@ input[type='color'] {
 
 .inspector .effect-row {
   grid-template-columns: 1fr 66px 22px 18px 18px 20px;
+}
+
+/*
+ * The assistant column.
+ *
+ * A fourth zone, and the only one that is neither a noun nor a verb: it is a
+ * conversation about the project. It sits outside the inspector deliberately -
+ * the inspector is about the SELECTION, and a request here is as likely to be
+ * about the whole timeline as about one clip.
+ */
+.assistant {
+  grid-row: 2;
+  grid-column: 4;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--line);
+}
+
+.assistant h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.assistant-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.assistant-key,
+.assistant-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* The transcript takes what is left, so the field it is asked from stays put
+   at the bottom rather than being pushed off as the conversation grows. */
+.assistant-transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.assistant-line {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 7px 9px;
+  border-radius: 5px;
+}
+
+.assistant-line.is-you {
+  color: var(--text);
+  background: var(--bg-raised);
+}
+
+.assistant-line.is-assistant {
+  color: var(--text-dim);
+  background: transparent;
+  padding-left: 0;
+}
+
+/* A plan is the one thing here that has not happened yet, so it is the one
+   thing outlined in the accent rather than left to sit in the panel. */
+.assistant-plan {
+  flex: none;
+  padding: 9px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--bg-raised);
+}
+
+.assistant-plan h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.assistant-plan ol {
+  margin: 0;
+  padding-left: 16px;
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.assistant-plan li {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  word-break: break-word;
+}
+
+.assistant-verdict {
+  display: flex;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.assistant-verdict button {
+  flex: 1;
+}
+
+.assistant-error {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--danger);
+}
+
+.assistant textarea {
+  resize: vertical;
+  font: inherit;
+  font-size: 12px;
 }
 
 .stage {

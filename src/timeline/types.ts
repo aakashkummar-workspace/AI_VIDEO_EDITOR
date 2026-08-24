@@ -139,12 +139,23 @@ export type Transform = {
   y: number
   /** 0 is invisible, 1 is solid. */
   opacity: number
+  /**
+   * Clockwise degrees about the centre of what is being drawn.
+   *
+   * Not the same thing as a source's own `rotation`, which is metadata the
+   * camera wrote and the renderer honours before anybody has said anything.
+   * This is what somebody ASKED for on top of that - a clip that came out of a
+   * messaging app with its orientation already lost has nothing in its metadata
+   * to fix, and needs turning by hand.
+   */
+  rotation: number
 }
 
 export const IDENTITY_TRANSFORM: Transform = {
   scale: 1,
   x: 0,
   y: 0,
+  rotation: 0,
   opacity: 1,
 }
 
@@ -157,12 +168,19 @@ export const IDENTITY_TRANSFORM: Transform = {
  * properties is what stops each new one arriving as its own special case with
  * its own storage, its own clamping and its own keyframe button.
  */
-export type AnimatableProperty = 'scale' | 'x' | 'y' | 'opacity' | 'volume'
+export type AnimatableProperty =
+  | 'scale'
+  | 'x'
+  | 'y'
+  | 'rotation'
+  | 'opacity'
+  | 'volume'
 
 export const ANIMATABLE_PROPERTIES: AnimatableProperty[] = [
   'scale',
   'x',
   'y',
+  'rotation',
   'opacity',
   'volume',
 ]
@@ -172,6 +190,7 @@ export const TRANSFORM_PROPERTIES: AnimatableProperty[] = [
   'scale',
   'x',
   'y',
+  'rotation',
   'opacity',
 ]
 
@@ -180,6 +199,7 @@ export const PROPERTY_DEFAULTS: Record<AnimatableProperty, number> = {
   scale: 1,
   x: 0,
   y: 0,
+  rotation: 0,
   opacity: 1,
   volume: 1,
 }
@@ -192,6 +212,9 @@ export const PROPERTY_RANGES: Record<
   scale: { min: 0.01, max: 100 },
   x: { min: -100_000, max: 100_000 },
   y: { min: -100_000, max: 100_000 },
+  // A full turn either way. Wider would only ever mean the same picture, and
+  // an animation that spins more than once is several keyframes.
+  rotation: { min: -360, max: 360 },
   opacity: { min: 0, max: 1 },
   // Above 1 is a boost. Four is loud enough to be useful and low enough that
   // a slip of the finger does not blow the mix apart.
@@ -826,6 +849,7 @@ export function transformAt(
     scale: propertyAt(segment, 'scale', timelineMicros),
     x: propertyAt(segment, 'x', timelineMicros),
     y: propertyAt(segment, 'y', timelineMicros),
+    rotation: propertyAt(segment, 'rotation', timelineMicros),
     opacity: propertyAt(segment, 'opacity', timelineMicros),
   }
 }
@@ -952,6 +976,10 @@ export function occludesEverything(
   const transform = transformAt(segment, timelineMicros)
   if (transform.opacity < 1 || transform.scale < 1) return false
   if (transform.x !== 0 || transform.y !== 0) return false
+  // A turned picture leaves corners of whatever is under it showing, and even a
+  // quarter turn only fills the frame again if it is square. Refusing every
+  // non-zero rotation is the answer that cannot be subtly wrong.
+  if (transform.rotation !== 0) return false
 
   const source = sources[content.sourceId]
   if (!source) return false
